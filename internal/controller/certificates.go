@@ -60,6 +60,11 @@ type cancelBody struct {
 func (b *cancelBody) Close() error { defer b.finish(); return b.ReadCloser.Close() }
 
 func (a *App) queueProvision(ctx context.Context, id, actor string) (model.Task, error) {
+	unlock, e := a.Store.Lock(ctx, "node-operation:"+id)
+	if e != nil {
+		return model.Task{}, e
+	}
+	defer unlock()
 	rec, e := a.Store.Get(ctx, "node", id)
 	if e != nil {
 		return model.Task{}, e
@@ -84,17 +89,6 @@ func (a *App) queueProvision(ctx context.Context, id, actor string) (model.Task,
 	if a.Config.ACMEEmail == "" {
 		return model.Task{}, errors.New("ACME_EMAIL must be configured")
 	}
-	// One controller instance is supported. The SQL lock also prevents duplicate UI requests.
-	conn, e := a.Store.Pool.Acquire(ctx)
-	if e != nil {
-		return model.Task{}, e
-	}
-	defer conn.Release()
-	_, e = conn.Exec(ctx, "SELECT pg_advisory_lock(hashtext($1))", "provision-queue:"+id)
-	if e != nil {
-		return model.Task{}, e
-	}
-	defer conn.Exec(context.Background(), "SELECT pg_advisory_unlock(hashtext($1))", "provision-queue:"+id)
 	tasks, e := a.nodeTasks(ctx, id, false)
 	if e != nil {
 		return model.Task{}, e
@@ -137,6 +131,11 @@ func (a *App) certificateWorker(ctx context.Context) {
 func (a *App) runProvision(parent context.Context, t model.Task) {
 	ctx, cancel := context.WithTimeout(parent, 15*time.Minute)
 	defer cancel()
+	unlock, e := a.Store.Lock(ctx, "node-operation:"+t.NodeID)
+	if e != nil {
+		return
+	}
+	defer unlock()
 	rec, e := a.Store.Get(ctx, "node", t.NodeID)
 	if e != nil {
 		_ = a.Store.Patch(ctx, "task", t.ID, 0, map[string]string{"status": "failed", "message": "node no longer exists"})
@@ -146,18 +145,11 @@ func (a *App) runProvision(parent context.Context, t model.Task) {
 	if e != nil {
 		return
 	}
-	conn, e := a.Store.Pool.Acquire(ctx)
+	unlockZone, e := a.lockDNS(ctx, n)
 	if e != nil {
 		return
 	}
-	defer conn.Release()
-	lock := "acme:" + n.DNSAccountID
-	var acquired bool
-	e = conn.QueryRow(ctx, "SELECT pg_try_advisory_lock(hashtext($1))", lock).Scan(&acquired)
-	if e != nil || !acquired {
-		return
-	}
-	defer conn.Exec(context.Background(), "SELECT pg_advisory_unlock(hashtext($1))", lock)
+	defer unlockZone()
 	if e = a.Store.Patch(ctx, "task", t.ID, 0, map[string]string{"status": "running", "message": "preparing DNS and certificate"}); e != nil {
 		return
 	}

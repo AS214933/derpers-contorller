@@ -63,6 +63,15 @@ func (a *App) AddNode(ctx context.Context, n model.Node, sec map[string]string) 
 	if e = validNode(n); e != nil {
 		return n, e
 	}
+	if n.DNSAccountID != "" {
+		account, _, e := a.dnsAccount(ctx, n.DNSAccountID)
+		if e != nil {
+			return n, errors.New("DNS account does not exist")
+		}
+		if !within(n.Hostname, account.Suffix) {
+			return n, errors.New("hostname must be within DNS account suffix")
+		}
+	}
 	if sec["certificate_pem"] != "" {
 		if e = validCertificate(n.Hostname, sec["certificate_pem"], sec["certificate_key_pem"]); e != nil {
 			return n, e
@@ -369,6 +378,14 @@ func (a *App) nodesAPI(w http.ResponseWriter, r *http.Request, u model.User, par
 		failure(w, 405, "unsupported operation")
 		return
 	}
+	if (len(parts) == 1 && (r.Method == "PUT" || r.Method == "DELETE")) || (len(parts) == 2 && (parts[1] == "dns-import" || parts[1] == "dns-cleanup") && r.Method == "POST") {
+		unlock, e := a.Store.Lock(ctx, "node-operation:"+parts[0])
+		if e != nil {
+			apiError(w, e)
+			return
+		}
+		defer unlock()
+	}
 	rec, e := a.Store.Get(ctx, "node", parts[0])
 	if e != nil {
 		apiError(w, e)
@@ -389,6 +406,12 @@ func (a *App) nodesAPI(w http.ResponseWriter, r *http.Request, u model.User, par
 				failure(w, 409, "unpublish node before deleting")
 				return
 			}
+			unlockZone, e := a.lockDNS(ctx, n)
+			if e != nil {
+				apiError(w, e)
+				return
+			}
+			defer unlockZone()
 			if e = a.RemoveDNS(ctx, n); e != nil {
 				apiError(w, e)
 				return
@@ -427,6 +450,17 @@ func (a *App) nodesAPI(w http.ResponseWriter, r *http.Request, u model.User, par
 				apiError(w, e)
 				return
 			}
+			if v.DNSAccountID != "" {
+				account, _, e := a.dnsAccount(ctx, v.DNSAccountID)
+				if e != nil {
+					apiError(w, e)
+					return
+				}
+				if !within(v.Hostname, account.Suffix) {
+					failure(w, 400, "hostname must be within DNS account suffix")
+					return
+				}
+			}
 			if v.Hostname != n.Hostname {
 				v.Published = false
 			}
@@ -459,6 +493,12 @@ func (a *App) nodesAPI(w http.ResponseWriter, r *http.Request, u model.User, par
 		if r.Method != "POST" {
 			break
 		}
+		unlockZone, e := a.lockDNS(ctx, n)
+		if e != nil {
+			apiError(w, e)
+			return
+		}
+		defer unlockZone()
 		var v struct {
 			RecordIDs []string `json:"record_ids"`
 		}
@@ -477,6 +517,12 @@ func (a *App) nodesAPI(w http.ResponseWriter, r *http.Request, u model.User, par
 		if r.Method != "POST" {
 			break
 		}
+		unlockZone, e := a.lockDNS(ctx, n)
+		if e != nil {
+			apiError(w, e)
+			return
+		}
+		defer unlockZone()
 		if n.Published {
 			failure(w, 409, "unpublish before DNS cleanup")
 			return

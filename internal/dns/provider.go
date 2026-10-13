@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -74,7 +75,7 @@ func New(kind, zone string, s map[string]string) (Provider, error) {
 	}
 	switch kind {
 	case "cloudflare":
-		c, e := cf.NewWithAPIToken(s["api_token"])
+		c, e := cf.NewWithAPIToken(s["api_token"], cf.HTTPClient(&http.Client{Timeout: 30 * time.Second}))
 		if e != nil {
 			return nil, e
 		}
@@ -129,9 +130,20 @@ type cloudflare struct {
 	zone   string
 }
 
-func (p *cloudflare) zoneID() (string, error) { return p.client.ZoneIDByName(p.zone) }
+func (p *cloudflare) zoneID(ctx context.Context) (string, error) {
+	// ZoneIDByName uses context.Background in the SDK; use its contextual
+	// equivalent so cancellation also covers discovery, before record changes.
+	zones, err := p.client.ListZonesContext(ctx, cf.WithZoneFilters(p.zone, "", ""))
+	if err != nil {
+		return "", err
+	}
+	if len(zones.Result) != 1 || zones.Result[0].ID == "" {
+		return "", errors.New("DNS zone was not found or is ambiguous")
+	}
+	return zones.Result[0].ID, nil
+}
 func (p *cloudflare) List(ctx context.Context, name string) ([]Record, error) {
-	z, e := p.zoneID()
+	z, e := p.zoneID(ctx)
 	if e != nil {
 		return nil, e
 	}
@@ -148,20 +160,23 @@ func (p *cloudflare) List(ctx context.Context, name string) ([]Record, error) {
 	return out, nil
 }
 func (p *cloudflare) Put(ctx context.Context, r Record) (Record, error) {
-	z, e := p.zoneID()
+	z, e := p.zoneID(ctx)
 	if e != nil {
 		return r, e
 	}
 	if r.ID == "" {
 		v, e := p.client.CreateDNSRecord(ctx, cf.ZoneIdentifier(z), cf.CreateDNSRecordParams{Name: r.Name, Type: r.Type, Content: r.Value, TTL: 300, Proxied: ptr(false), Comment: "managed by derpers-controller"})
 		r.ID = v.ID
+		if e == nil && r.ID == "" {
+			e = errors.New("Cloudflare returned no DNS record ID")
+		}
 		return r, e
 	}
 	_, e = p.client.UpdateDNSRecord(ctx, cf.ZoneIdentifier(z), cf.UpdateDNSRecordParams{ID: r.ID, Name: r.Name, Type: r.Type, Content: r.Value, TTL: 300, Proxied: ptr(false)})
 	return r, e
 }
 func (p *cloudflare) Delete(ctx context.Context, r Record) error {
-	z, e := p.zoneID()
+	z, e := p.zoneID(ctx)
 	if e != nil {
 		return e
 	}
@@ -184,7 +199,7 @@ func (p *alibaba) List(ctx context.Context, name string) ([]Record, error) {
 		if e != nil {
 			return nil, e
 		}
-		if res.Body == nil || res.Body.DomainRecords == nil {
+		if res == nil || res.Body == nil || res.Body.DomainRecords == nil || res.Body.TotalCount == nil {
 			return nil, errors.New("incomplete AliDNS response")
 		}
 		for _, r := range res.Body.DomainRecords.Record {
@@ -203,6 +218,9 @@ func (p *alibaba) Put(ctx context.Context, r Record) (Record, error) {
 	if r.ID == "" {
 		res, e := ali.AddDomainRecordWithContext(ctx, p.client, new(ali.AddDomainRecordRequest).SetDomainName(p.zone).SetRR(relative(r.Name, p.zone)).SetType(r.Type).SetValue(r.Value).SetTTL(600), &dara.RuntimeOptions{})
 		if e == nil {
+			if res == nil || res.Body == nil || val(res.Body.RecordId) == "" {
+				return r, errors.New("AliDNS returned no DNS record ID")
+			}
 			r.ID = val(res.Body.RecordId)
 		}
 		return r, e
@@ -238,7 +256,7 @@ func (p *tencent) List(ctx context.Context, name string) ([]Record, error) {
 			}
 			return nil, e
 		}
-		if res.Response == nil {
+		if res == nil || res.Response == nil {
 			return nil, errors.New("incomplete DNSPod response")
 		}
 		for _, r := range res.Response.RecordList {
@@ -264,6 +282,9 @@ func (p *tencent) Put(ctx context.Context, r Record) (Record, error) {
 		q.TTL = ptr(uint64(600))
 		res, e := tc.CreateRecordWithContext(ctx, p.client, q)
 		if e == nil {
+			if res == nil || res.Response == nil || val(res.Response.RecordId) == 0 {
+				return r, errors.New("DNSPod returned no DNS record ID")
+			}
 			r.ID = strconv.FormatUint(val(res.Response.RecordId), 10)
 		}
 		return r, e
