@@ -33,7 +33,10 @@ services:
       OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
       OIDC_ADMIN_GROUPS: ${OIDC_ADMIN_GROUPS:-derpers-admin}
       PUBLIC_URL: ${PUBLIC_URL:-https://localhost:8443}
+      GRAFANA_URL: ${GRAFANA_URL:-}
+      PROMETHEUS_URL: ${PROMETHEUS_URL:-}
       DERPER_IMAGE: ghcr.io/as214933/derpers-contorller-derper:${IMAGE_VERSION:-edge}
+      AGENT_IMAGE: ghcr.io/as214933/derpers-contorller-agent:${IMAGE_VERSION:-edge}
       CADDY_IMAGE: caddy:2.11.7-alpine@sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f
       ACME_EMAIL: ${ACME_EMAIL:-}
       ACME_DIRECTORY: ${ACME_DIRECTORY:-https://acme-v02.api.letsencrypt.org/directory}

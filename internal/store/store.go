@@ -22,8 +22,9 @@ var ErrConflict = errors.New("resource changed; reload and retry")
 var ErrNotFound = errors.New("resource not found")
 
 type Store struct {
-	Pool *pgxpool.Pool
-	aead cipher.AEAD
+	Pool     *pgxpool.Pool
+	lockPool *pgxpool.Pool
+	aead     cipher.AEAD
 }
 type Record struct {
 	Kind, ID, Owner string
@@ -45,24 +46,45 @@ func Open(ctx context.Context, url, master string) (*Store, error) {
 	if e != nil {
 		return nil, e
 	}
-	p, e := pgxpool.New(ctx, url)
+	cfg, e := pgxpool.ParseConfig(url)
 	if e != nil {
 		return nil, e
 	}
-	s := &Store{p, a}
+	p, e := pgxpool.NewWithConfig(ctx, cfg)
+	if e != nil {
+		return nil, e
+	}
 	if e = p.Ping(ctx); e != nil {
 		p.Close()
 		return nil, e
 	}
+	lockCfg := cfg.Copy()
+	lockCfg.MaxConns = 16
+	lockCfg.MinConns = 0
+	lockCfg.MinIdleConns = 0
+	locks, e := pgxpool.NewWithConfig(ctx, lockCfg)
+	if e != nil {
+		p.Close()
+		return nil, e
+	}
+	s := &Store{Pool: p, lockPool: locks, aead: a}
 	return s, nil
 }
-func (s *Store) Close() { s.Pool.Close() }
+func (s *Store) Close() { s.Pool.Close(); s.lockPool.Close() }
 
 // Lock uses a dedicated session; contention is reported instead of waiting
 // behind a long ACME operation. Always call release on the success path.
 func (s *Store) Lock(ctx context.Context, key string) (func(), error) {
-	conn, e := s.Pool.Acquire(ctx)
+	// Advisory lock sessions never consume the connections used by admission.
+	// A bounded acquire also avoids starvation when a node operation needs its
+	// second, zone-scoped lock while the lock pool is already saturated.
+	acquireCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
+	defer cancel()
+	conn, e := s.lockPool.Acquire(acquireCtx)
 	if e != nil {
+		if ctx.Err() == nil && acquireCtx.Err() != nil {
+			return nil, ErrConflict
+		}
 		return nil, e
 	}
 	var acquired bool
@@ -163,10 +185,18 @@ func (s *Store) Save(ctx context.Context, kind, id, owner string, revision int64
 		encrypted = s.Encrypt(kind, id, v)
 	}
 	if revision == 1 {
+		if kind == "network" {
+			_, e = s.Pool.Exec(ctx, `WITH changed AS (INSERT INTO resources(kind,id,owner_id,revision,data,secret) VALUES($1,$2,$3,$4,$5,$6) RETURNING id) SELECT pg_notify('derpers_network',id) FROM changed`, kind, id, owner, revision, b, encrypted)
+			return e
+		}
 		_, e = s.Pool.Exec(ctx, "INSERT INTO resources(kind,id,owner_id,revision,data,secret) VALUES($1,$2,$3,$4,$5,$6)", kind, id, owner, revision, b, encrypted)
 		return e
 	}
-	q, e := s.Pool.Exec(ctx, "UPDATE resources SET owner_id=$3,revision=$4,data=$5::jsonb || CASE WHEN kind='node' THEN jsonb_build_object('last_seen',data->'last_seen','applied_revision',data->'applied_revision','metrics',data->'metrics','status',data->'status') ELSE '{}'::jsonb END,secret=COALESCE($6,secret) WHERE kind=$1 AND id=$2 AND revision=$7", kind, id, owner, revision, b, encrypted, revision-1)
+	query := "UPDATE resources SET owner_id=$3,revision=$4,data=$5::jsonb || CASE WHEN kind='node' THEN jsonb_build_object('last_seen',data->'last_seen','applied_revision',data->'applied_revision','metrics',data->'metrics','status',data->'status') ELSE '{}'::jsonb END,secret=COALESCE($6,secret) WHERE kind=$1 AND id=$2 AND revision=$7"
+	if kind == "network" {
+		query = "WITH changed AS (" + query + " RETURNING id) SELECT pg_notify('derpers_network',id) FROM changed"
+	}
+	q, e := s.Pool.Exec(ctx, query, kind, id, owner, revision, b, encrypted, revision-1)
 	if e != nil {
 		return e
 	}
@@ -292,7 +322,11 @@ func (s *Store) CompleteNodeTask(ctx context.Context, t model.Task, result model
 	return tx.Commit(ctx)
 }
 func (s *Store) Delete(ctx context.Context, kind, id string) error {
-	q, e := s.Pool.Exec(ctx, "DELETE FROM resources WHERE kind=$1 AND id=$2", kind, id)
+	query := "DELETE FROM resources WHERE kind=$1 AND id=$2"
+	if kind == "network" {
+		query = "WITH removed AS (" + query + " RETURNING id) SELECT pg_notify('derpers_network',id) FROM removed"
+	}
+	q, e := s.Pool.Exec(ctx, query, kind, id)
 	if e == nil && q.RowsAffected() == 0 {
 		return ErrNotFound
 	}

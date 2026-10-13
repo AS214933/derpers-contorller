@@ -116,8 +116,8 @@ func (a *App) InitAuth(ctx context.Context) error {
 }
 func (a *App) Background(ctx context.Context) {
 	go a.certificateWorker(ctx)
+	go a.watchNetworks(ctx)
 	go func() {
-		a.syncAll(ctx)
 		tick := time.NewTicker(5 * time.Minute)
 		defer tick.Stop()
 		for {
