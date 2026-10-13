@@ -301,9 +301,6 @@ func (a *App) networkAPI(w http.ResponseWriter, r *http.Request, u model.User, p
 		}
 		a.invalidate(n.ID)
 		a.event(ctx, "network_saved", u.ID, "", n.ID, "source tested and saved")
-		if n.Status == "approved" && n.Kind == "tailscale" {
-			go func() { _ = a.SyncNetwork(context.Background(), n.ID) }()
-		}
 		jsonResponse(w, 200, n)
 		return
 	}
@@ -315,7 +312,20 @@ func (a *App) networkAPI(w http.ResponseWriter, r *http.Request, u model.User, p
 		}
 		switch parts[1] {
 		case "test":
-			if e = a.TestNetwork(ctx, old, sec); e != nil {
+			e = a.TestNetwork(ctx, old, sec)
+			patch := map[string]any{"health": "healthy", "last_error": ""}
+			if e != nil {
+				patch["health"] = "degraded"
+				patch["last_error"] = e.Error()
+			} else if old.Kind == "headscale" {
+				patch["last_success"] = time.Now().UTC()
+			}
+			if x := a.Store.Patch(ctx, "network", old.ID, old.Revision, patch); x != nil {
+				apiError(w, x)
+				return
+			}
+			a.event(ctx, "source_test", u.ID, "", old.ID, patch["health"].(string))
+			if e != nil {
 				apiError(w, e)
 				return
 			}
@@ -396,15 +406,20 @@ func (a *App) SetNetworkStatus(ctx context.Context, id, status, actor string) (m
 		}
 	}
 	n.Status = status
+	if status == "approved" {
+		n.Health = "healthy"
+		n.LastError = ""
+		if n.Kind == "headscale" {
+			now := time.Now().UTC()
+			n.LastSuccess = &now
+		}
+	}
 	n.Revision++
 	if e = a.Store.Save(ctx, "network", id, n.OwnerID, n.Revision, n, nil); e != nil {
 		return n, e
 	}
 	a.invalidate(id)
 	a.event(ctx, "network_status", actor, "", id, status)
-	if status == "approved" && n.Kind == "tailscale" {
-		go func() { _ = a.SyncNetwork(context.Background(), id) }()
-	}
 	return n, nil
 }
 func (a *App) DERPMap(ctx context.Context, only bool) (tailcfg.DERPMap, error) {

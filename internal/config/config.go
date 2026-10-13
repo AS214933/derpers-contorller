@@ -31,13 +31,14 @@ type Config struct {
 	GrafanaURL       string   `yaml:"grafana_url"`
 	PrometheusURL    string   `yaml:"prometheus_url"`
 	DerperImage      string   `yaml:"derper_image"`
+	AgentImage       string   `yaml:"agent_image"`
 	CaddyImage       string   `yaml:"caddy_image"`
 	ACMEEmail        string   `yaml:"acme_email"`
 	ACMEDirectory    string   `yaml:"acme_directory"`
 }
 
 func Load(path string) (Config, error) {
-	c := Config{HTTPAddr: ":8080", TLSAddr: ":8443", WebDir: "web/dist", OIDCGroupsClaim: "groups", OIDCScopes: []string{"openid", "profile", "email", "groups"}, GrafanaURL: "/grafana/", PrometheusURL: "/prometheus/", DerperImage: "ghcr.io/as214933/derpers-contorller-derper:edge", CaddyImage: "caddy:2.11.7", ACMEDirectory: "https://acme-v02.api.letsencrypt.org/directory"}
+	c := Config{HTTPAddr: ":8080", TLSAddr: ":8443", WebDir: "web/dist", OIDCGroupsClaim: "groups", OIDCScopes: []string{"openid", "profile", "email", "groups"}, AgentImage: "ghcr.io/as214933/derpers-contorller-agent:edge", DerperImage: "ghcr.io/as214933/derpers-contorller-derper:edge", CaddyImage: "caddy:2.11.7", ACMEDirectory: "https://acme-v02.api.letsencrypt.org/directory"}
 	if path != "" {
 		b, e := os.ReadFile(path)
 		if e != nil {
@@ -52,6 +53,9 @@ func Load(path string) (Config, error) {
 		if s, ok := os.LookupEnv(k); ok {
 			*p = s
 		}
+	}
+	if s, ok := os.LookupEnv("AGENT_IMAGE"); ok {
+		c.AgentImage = s
 	}
 	if s, ok := os.LookupEnv("HEADSCALE_ALLOWED_CIDRS"); ok {
 		c.AllowedCIDRs = split(s)

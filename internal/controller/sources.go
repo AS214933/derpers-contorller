@@ -107,6 +107,9 @@ func (a *App) syncAll(ctx context.Context) {
 	wg.Wait()
 }
 func (a *App) SyncNetwork(ctx context.Context, id string) error {
+	return a.syncNetwork(ctx, id, true)
+}
+func (a *App) syncNetwork(ctx context.Context, id string, force bool) error {
 	lock, _ := a.syncLocks.LoadOrStore(id, &sync.Mutex{})
 	m := lock.(*sync.Mutex)
 	m.Lock()
@@ -121,6 +124,14 @@ func (a *App) SyncNetwork(ctx context.Context, id string) error {
 	}
 	if n.Status != "approved" || n.Kind != "tailscale" {
 		return errors.New("source is not an approved official tailnet")
+	}
+	if !force {
+		a.mu.RLock()
+		snap, ok := a.snapshots[id]
+		a.mu.RUnlock()
+		if ok && snap.Revision == n.Revision && time.Now().Before(snap.Expires) {
+			return nil
+		}
 	}
 	sec, e := a.Store.Secrets(rec)
 	if e != nil {

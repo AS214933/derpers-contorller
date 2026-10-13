@@ -19,6 +19,9 @@ import (
 )
 
 func (a *App) AddNode(ctx context.Context, n model.Node, sec map[string]string) (model.Node, error) {
+	return a.addNode(ctx, n, sec, "operator")
+}
+func (a *App) addNode(ctx context.Context, n model.Node, sec map[string]string, actor string) (model.Node, error) {
 	if n.HTTPSPort == 0 {
 		n.HTTPSPort = 443
 	}
@@ -87,7 +90,7 @@ func (a *App) AddNode(ctx context.Context, n model.Node, sec map[string]string) 
 	n.Metrics = nil
 	e = a.Store.Save(ctx, "node", n.ID, "", 1, n, sec)
 	if e == nil {
-		a.event(ctx, "node_created", "operator", n.ID, "", "node configuration created")
+		a.event(ctx, "node_created", actor, n.ID, "", "node configuration created")
 	}
 	return n, e
 }
@@ -109,6 +112,9 @@ func validCertificate(host, cert, key string) error {
 	return nil
 }
 func (a *App) PublishNode(ctx context.Context, id string) (model.Node, error) {
+	return a.publishNode(ctx, id, "operator")
+}
+func (a *App) publishNode(ctx context.Context, id, actor string) (model.Node, error) {
 	r, e := a.Store.Get(ctx, "node", id)
 	if e != nil {
 		return model.Node{}, e
@@ -142,7 +148,7 @@ func (a *App) PublishNode(ctx context.Context, id string) (model.Node, error) {
 	n.Published = true
 	e = a.Store.Patch(ctx, "node", id, n.Revision, map[string]any{"published": true})
 	if e == nil {
-		a.event(ctx, "node_published", "operator", id, "", "TLS and probe validated")
+		a.event(ctx, "node_published", actor, id, "", "TLS and probe validated")
 	}
 	return n, e
 }
@@ -295,6 +301,7 @@ func (a *App) nodeAPI(w http.ResponseWriter, r *http.Request) {
 			failure(w, 400, "certificate renewal failed")
 			return
 		}
+		a.event(ctx, "node_identity_renewed", "node:"+n.ID, n.ID, "", "node identity certificate renewed")
 		jsonResponse(w, 200, res)
 		return
 	}
@@ -345,7 +352,7 @@ func (a *App) nodesAPI(w http.ResponseWriter, r *http.Request, u model.User, par
 					n.DerperImage = ""
 					n.CaddyImage = ""
 					n.DNSAccountID = ""
-					n.Metrics = nil
+					n.Metrics = publicHealthMetrics(n.Metrics)
 				}
 				if n.LastSeen != nil && time.Since(*n.LastSeen) > time.Minute {
 					n.Status = "offline"
@@ -366,7 +373,7 @@ func (a *App) nodesAPI(w http.ResponseWriter, r *http.Request, u model.User, par
 			apiError(w, e)
 			return
 		}
-		v, e := a.AddNode(ctx, n, map[string]string{})
+		v, e := a.addNode(ctx, n, map[string]string{}, u.ID)
 		if e != nil {
 			apiError(w, e)
 			return
@@ -550,7 +557,7 @@ func (a *App) nodesAPI(w http.ResponseWriter, r *http.Request, u model.User, par
 		if r.Method != "POST" {
 			break
 		}
-		v, e := a.PublishNode(ctx, n.ID)
+		v, e := a.publishNode(ctx, n.ID, u.ID)
 		if e != nil {
 			apiError(w, e)
 			return
@@ -650,30 +657,48 @@ func (a *App) nodesAPI(w http.ResponseWriter, r *http.Request, u model.User, par
 	}
 	failure(w, 405, "unsupported node operation")
 }
+func publicHealthMetrics(metrics map[string]float64) map[string]float64 {
+	out := map[string]float64{}
+	for _, k := range []string{"derper_up", "derper_process_up", "caddy_process_up", "derper_metrics_up", "derper_probe_timestamp_seconds"} {
+		if v, ok := metrics[k]; ok {
+			out[k] = v
+		}
+	}
+	return out
+}
 func (a *App) Deployment(n model.Node) string {
+	image := a.Config.AgentImage
+	if image == "" {
+		image = "ghcr.io/as214933/derpers-contorller-agent:edge"
+	}
+	network := "derpers-node-" + n.ID
 	return fmt.Sprintf(`# Generate a short-lived enrollment token in the portal.
 # Replace HOST paths with absolute paths on THIS node host.
+# For a private controller CA, put its public certificate in TRUST_DIR and
+# set CONTROLLER_CA_FILE=/trust/controller-ca.crt before first enrollment.
 services:
   agent:
-    image: ghcr.io/as214933/derpers-contorller-agent:edge
+    image: %q
     restart: unless-stopped
     environment:
       CONTROLLER_URL: %q
       ENROLLMENT_TOKEN: "${ENROLLMENT_TOKEN}"
+      CONTROLLER_CA_FILE: "${CONTROLLER_CA_FILE:-}"
       NODE_ID: %q
       STATE_DIR: /var/lib/derpers-agent
       CONFIG_DIR: /node
       HOST_STATE_DIR: "${NODE_DIR}/agent"
       HOST_CONFIG_DIR: "${NODE_DIR}/config"
-      DOCKER_NETWORK: derpers-node
+      DOCKER_NETWORK: %q
       MANAGE_CONTAINERS: "true"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - "${NODE_DIR}/agent:/var/lib/derpers-agent"
       - "${NODE_DIR}/config:/node"
+      - "${TRUST_DIR:-./trust}:/trust:ro"
     networks: [node]
 networks:
   node:
-    name: derpers-node
-`, a.Config.ControllerURL, n.ID)
+    name: %q
+`, image, a.Config.ControllerURL, n.ID, network, network)
 }

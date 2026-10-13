@@ -9,12 +9,26 @@ groups:
         annotations:
           summary: DERP controller is unavailable; new admission requests fail closed
       - alert: DerpersNodeOffline
-        expr: derpers_node_online == 0
+        expr: derpers_node_online == 0 and on(node_id) derpers_node_enabled == 1 and on(node_id) derpers_node_published == 1
         for: 2m
         labels:
           severity: warning
         annotations:
           summary: A DERP node has not reported a recent heartbeat
+      - alert: DerpersRelayUnavailable
+        expr: derpers_node_derper_up == 0 and on(node_id) (time() - derpers_node_derper_probe_timestamp_seconds < 60) and on(node_id) derpers_node_online == 1 and on(node_id) derpers_node_enabled == 1 and on(node_id) derpers_node_published == 1
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Node management is online but its DERP TLS probe is failing
+      - alert: DerpersRelayProbeStale
+        expr: time() - derpers_node_derper_probe_timestamp_seconds > 60 and on(node_id) derpers_node_online == 1 and on(node_id) derpers_node_enabled == 1 and on(node_id) derpers_node_published == 1
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Node heartbeat is current but its DERP health sample is stale
       - alert: DerpersAuthorizationSyncFailing
         expr: increase(derpers_sync_errors_total[10m]) > 0
         for: 5m

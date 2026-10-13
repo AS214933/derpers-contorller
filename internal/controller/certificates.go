@@ -153,7 +153,11 @@ func (a *App) runProvision(parent context.Context, t model.Task) {
 	if e = a.Store.Patch(ctx, "task", t.ID, 0, map[string]string{"status": "running", "message": "preparing DNS and certificate"}); e != nil {
 		return
 	}
-	e = a.provision(ctx, n, rec)
+	sec, secretErr := a.Store.Secrets(rec)
+	checkpoint := secretErr == nil && sec["certificate_task_id"] == t.ID && validCertificate(n.Hostname, sec["certificate_pem"], sec["certificate_key_pem"]) == nil
+	if !checkpoint {
+		e = a.provision(ctx, n, rec, t.ID)
+	}
 	if parent.Err() != nil {
 		return
 	} // Keep a resumable running task on shutdown.
@@ -163,10 +167,29 @@ func (a *App) runProvision(parent context.Context, t model.Task) {
 		msg = e.Error()
 		a.certificateFailures.Add(1)
 	}
+	if e == nil && n.Published && n.AppliedRevision > 0 {
+		current, x := a.Store.Get(ctx, "node", n.ID)
+		if x == nil {
+			latest, x := store.Decode[model.Node](current)
+			if x == nil {
+				if !a.waitCertificateRollout(ctx, n.ID, latest.Revision) {
+					msg = "certificate issued; Agent application was not confirmed"
+					a.certificateFailures.Add(1)
+					a.event(ctx, "certificate_rollout_unconfirmed", "system", n.ID, "", msg)
+				}
+			}
+		}
+		// Keep live-node restarts separated even when ACME reuses an authorization.
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(20 * time.Second):
+		}
+	}
 	_ = a.Store.Patch(ctx, "task", t.ID, 0, map[string]string{"status": status, "message": msg})
 	a.event(ctx, "certificate_"+status, "system", n.ID, "", msg)
 }
-func (a *App) provision(ctx context.Context, n model.Node, rec store.Record) error {
+func (a *App) provision(ctx context.Context, n model.Node, rec store.Record, taskID string) error {
 	if !n.Enabled {
 		return errors.New("node is disabled")
 	}
@@ -272,6 +295,7 @@ func (a *App) provision(ctx context.Context, n model.Node, rec store.Record) err
 	}
 	nodeSecrets["certificate_pem"] = string(result.Certificate)
 	nodeSecrets["certificate_key_pem"] = string(result.PrivateKey)
+	nodeSecrets["certificate_task_id"] = taskID
 	delete(nodeSecrets, "ca_pem")
 	current.Revision++
 	if e = a.Store.Save(ctx, "node", n.ID, "", current.Revision, current, nodeSecrets); e != nil {
@@ -279,6 +303,29 @@ func (a *App) provision(ctx context.Context, n model.Node, rec store.Record) err
 	}
 	_ = a.Store.Patch(ctx, "dns", account.ID, 0, map[string]string{"health": "healthy", "last_error": ""})
 	return nil
+}
+func (a *App) waitCertificateRollout(parent context.Context, id string, revision int64) bool {
+	ctx, cancel := context.WithTimeout(parent, 2*time.Minute)
+	defer cancel()
+	tick := time.NewTicker(time.Second)
+	defer tick.Stop()
+	for {
+		r, e := a.Store.Get(ctx, "node", id)
+		if e == nil {
+			n, e := store.Decode[model.Node](r)
+			if e == nil && relayRevisionApplied(n, revision, time.Now()) {
+				return true
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-tick.C:
+		}
+	}
+}
+func relayRevisionApplied(n model.Node, revision int64, now time.Time) bool {
+	return n.Enabled && n.AppliedRevision >= revision && n.LastSeen != nil && now.Sub(*n.LastSeen) < time.Minute && n.Metrics["derper_up"] == 1 && n.Metrics["derper_probe_timestamp_seconds"] >= float64(now.Add(-time.Minute).Unix())
 }
 func (a *App) RenewCertificates(ctx context.Context) {
 	rows, e := a.Store.List(ctx, "node", "")
@@ -342,6 +389,15 @@ func (a *App) metrics(w http.ResponseWriter, r *http.Request) {
 			online = 1
 		}
 		writeMetric(w, "derpers_node_online", online, labels)
+		enabled, published := float64(0), float64(0)
+		if n.Enabled {
+			enabled = 1
+		}
+		if n.Published {
+			published = 1
+		}
+		writeMetric(w, "derpers_node_enabled", enabled, labels)
+		writeMetric(w, "derpers_node_published", published, labels)
 		if sec, e := a.Store.Secrets(rec); e == nil {
 			if p, _ := pem.Decode([]byte(sec["certificate_pem"])); p != nil {
 				if cert, e := x509.ParseCertificate(p.Bytes); e == nil {
