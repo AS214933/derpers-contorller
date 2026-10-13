@@ -54,7 +54,12 @@ collect() {
 cleanup() {
   local result=$?
   record "TEST_RESULT exit=$result final_stage=$stage port=$DERP_PORT arch=$(uname -m)"
-  if [[ -n "$fault_pid" ]]; then sudo nsenter -t "$fault_pid" -n iptables -D OUTPUT -d "$caddy_ip" -p tcp --dport 9080 -j REJECT 2>/dev/null || true; fi
+  if [[ -n "$fault_pid" ]]; then
+    sudo nsenter -t "$fault_pid" -n iptables -nvL OUTPUT 2>&1 | tee "$evidence/verify-transport-fault-ipv4.txt" >/dev/null || true
+    sudo nsenter -t "$fault_pid" -n ip6tables -nvL OUTPUT 2>&1 | tee "$evidence/verify-transport-fault-ipv6.txt" >/dev/null || true
+    sudo nsenter -t "$fault_pid" -n iptables -D OUTPUT -p tcp --dport 9080 -j REJECT --reject-with tcp-reset 2>/dev/null || true
+    sudo nsenter -t "$fault_pid" -n ip6tables -D OUTPUT -p tcp --dport 9080 -j REJECT --reject-with tcp-reset 2>/dev/null || true
+  fi
   collect
   # Stop reconciliation before removing its managed components.
   "${compose[@]}" --profile agent stop -t 5 agent >/dev/null 2>&1 || true
@@ -236,14 +241,22 @@ stage=verify-transport-failure
 # Caddy's 502 would reject even with fail-open=true. This forces Do() itself to fail.
 fault_started="$(date -u +%FT%TZ)"
 fault_pid="$(docker inspect -f '{{.State.Pid}}' "$derper")"
-caddy_ip="$(docker inspect "$caddy" | jq -er '.[0].NetworkSettings.Networks[] | .IPAddress')"
-sudo nsenter -t "$fault_pid" -n iptables -I OUTPUT 1 -d "$caddy_ip" -p tcp --dport 9080 -j REJECT
+# Block the internal verification port for both address families: Go's HTTP
+# transport may retry the Docker hostname over IPv6 after IPv4 is rejected.
+sudo nsenter -t "$fault_pid" -n iptables -I OUTPUT 1 -p tcp --dport 9080 -j REJECT --reject-with tcp-reset
+sudo nsenter -t "$fault_pid" -n ip6tables -I OUTPUT 1 -p tcp --dport 9080 -j REJECT --reject-with tcp-reset
+sudo nsenter -t "$fault_pid" -n iptables -C OUTPUT -p tcp --dport 9080 -j REJECT --reject-with tcp-reset
+sudo nsenter -t "$fault_pid" -n ip6tables -C OUTPUT -p tcp --dport 9080 -j REJECT --reject-with tcp-reset
 client client-a tailscale debug break-derp-conns
 client client-b tailscale debug break-derp-conns
 negative
+[[ "$(docker inspect -f '{{.State.Pid}}' "$derper")" == "$fault_pid" ]]
+sudo nsenter -t "$fault_pid" -n iptables -nvL OUTPUT | tee "$evidence/verify-transport-fault-ipv4.txt" >/dev/null
+sudo nsenter -t "$fault_pid" -n ip6tables -nvL OUTPUT | tee "$evidence/verify-transport-fault-ipv6.txt" >/dev/null
 docker logs --since "$fault_started" "$derper" >"$evidence/verify-transport-failure-derper.log" 2>&1
-grep -Eq 'rejected:.*Post .*http://caddy:9080/verify.*(refused|unreachable|timeout)' "$evidence/verify-transport-failure-derper.log"
-sudo nsenter -t "$fault_pid" -n iptables -D OUTPUT -d "$caddy_ip" -p tcp --dport 9080 -j REJECT
+grep -Eq 'rejected:.*Post .*http://caddy:9080/verify.*(refused|unreachable|timeout|deadline exceeded|reset)' "$evidence/verify-transport-failure-derper.log"
+sudo nsenter -t "$fault_pid" -n iptables -D OUTPUT -p tcp --dport 9080 -j REJECT --reject-with tcp-reset
+sudo nsenter -t "$fault_pid" -n ip6tables -D OUTPUT -p tcp --dport 9080 -j REJECT --reject-with tcp-reset
 fault_pid=""
 stage=transport-restored
 wait_for 90 baseline
