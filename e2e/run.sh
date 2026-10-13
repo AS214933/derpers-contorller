@@ -263,7 +263,9 @@ wait_for 90 baseline
 stage=internal-isolation
 status="$(client client-a curl --cacert /certs/ca.crt -s -o /dev/null -w '%{http_code}' "https://derp.e2e.test:$DERP_PORT/debug/vars")"
 [[ "$status" == 403 ]]
-docker inspect "$derper" "$caddy" | jq -e 'all(.[]; [.HostConfig.PortBindings | keys[]?] | all(.=="443/tcp" or .=="8443/tcp" or .=="3478/udp" or .=="80/tcp"))' >/dev/null
+docker inspect "$derper" "$caddy" | jq '[.[] | {name:.Name, HostConfig:{PortBindings:.HostConfig.PortBindings}}]' >"$evidence/published-port-bindings.json"
+# Docker represents disabled port publishing as null, equivalent to no bindings.
+jq -e 'all(.[]; [(.HostConfig.PortBindings // {}) | keys[]] | all(.=="443/tcp" or .=="8443/tcp" or .=="3478/udp" or .=="80/tcp"))' "$evidence/published-port-bindings.json" >/dev/null
 record "PASS stage=$stage debug protected and no internal port published"
 stage=complete
 record "PASS all stages"
