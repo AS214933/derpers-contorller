@@ -31,6 +31,16 @@ func domain(s string) bool {
 	return true
 }
 func within(name, zone string) bool { return name == zone || strings.HasSuffix(name, "."+zone) }
+func (a *App) lockDNS(ctx context.Context, n model.Node) (func(), error) {
+	if n.DNSAccountID == "" {
+		return func() {}, nil
+	}
+	account, _, e := a.dnsAccount(ctx, n.DNSAccountID)
+	if e != nil {
+		return nil, e
+	}
+	return a.Store.Lock(ctx, "dns-zone:"+account.Provider+":"+account.Zone)
+}
 func validateDNS(n model.DNSAccount, s map[string]string) error {
 	if n.Name == "" || !domain(n.Zone) || !domain(n.Suffix) || !within(n.Suffix, n.Zone) {
 		return errors.New("name, valid DNS zone, and a suffix within that zone are required")
@@ -134,6 +144,24 @@ func (a *App) dnsAPI(w http.ResponseWriter, r *http.Request, u model.User, parts
 		if e = validateDNS(n, s); e != nil {
 			apiError(w, e)
 			return
+		}
+		if old.ID != "" && old.Suffix != n.Suffix {
+			rows, e := a.Store.List(ctx, "node", "")
+			if e != nil {
+				apiError(w, e)
+				return
+			}
+			for _, rec := range rows {
+				node, e := store.Decode[model.Node](rec)
+				if e != nil {
+					apiError(w, e)
+					return
+				}
+				if node.DNSAccountID == old.ID && !within(node.Hostname, n.Suffix) {
+					failure(w, 409, "new DNS suffix excludes an assigned node")
+					return
+				}
+			}
 		}
 		if e = testDNS(ctx, n, s); e != nil {
 			apiError(w, e)
@@ -362,13 +390,22 @@ func (a *App) ImportDNS(ctx context.Context, id string, ids []string) error {
 	}
 	for _, r := range rs {
 		if wanted[r.ID] {
+			var count int
+			e = a.Store.Pool.QueryRow(ctx, `SELECT count(*) FROM dns_records d JOIN resources a ON a.kind='dns' AND a.id=d.account_id WHERE a.data->>'provider'=$1 AND a.data->>'zone'=$2 AND (d.account_id<>$3 OR d.node_id<>$4) AND EXISTS(SELECT 1 FROM jsonb_array_elements(d.data) x WHERE x->>'id'=$5)`, account.Provider, account.Zone, account.ID, n.ID, r.ID).Scan(&count)
+			if e != nil {
+				return e
+			}
+			if count != 0 {
+				return errors.New("DNS record is already owned by another node")
+			}
 			if r.Name != n.Hostname || r.Type != "A" && r.Type != "AAAA" {
 				return errors.New("only matching node A/AAAA records may be imported")
 			}
 			found := false
-			for _, old := range out {
+			for i, old := range out {
 				if old.ID == r.ID {
 					found = true
+					out[i] = r
 				}
 			}
 			if !found {

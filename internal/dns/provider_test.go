@@ -3,11 +3,14 @@ package dns
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	openapi "github.com/alibabacloud-go/darabonba-openapi/v2/client"
 	cf "github.com/cloudflare/cloudflare-go"
@@ -152,5 +155,70 @@ func TestChallengeAccountsAreIndependent(t *testing.T) {
 	}
 	if _, e := New("unsupported", "example.test", nil); e == nil {
 		t.Fatal("unknown provider allowed")
+	}
+}
+
+func TestCloudflareCancellationCoversZoneLookupBeforeAllOperations(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success":true,"result":[{"id":"zone-1","name":"example.test"}]}`))
+	}))
+	defer server.Close()
+	client, err := cf.NewWithAPIToken("test-token", cf.BaseURL(server.URL), cf.HTTPClient(&http.Client{Timeout: time.Second}), cf.UsingRetryPolicy(0, 0, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &cloudflare{client: client, zone: "example.test"}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err = p.List(ctx, "node.example.test"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("List cancellation: %v", err)
+	}
+	if _, err = p.Put(ctx, Record{Name: "node.example.test", Type: "A", Value: "203.0.113.1"}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Put cancellation: %v", err)
+	}
+	if err = p.Delete(ctx, Record{ID: "record-1"}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Delete cancellation: %v", err)
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("canceled DNS operations still made %d context-free zone requests", calls.Load())
+	}
+}
+
+func TestCloudflareCancelsInflightZoneLookup(t *testing.T) {
+	started, release := make(chan struct{}), make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	defer server.Close()
+	defer close(release)
+	client, err := cf.NewWithAPIToken("test-token", cf.BaseURL(server.URL), cf.HTTPClient(&http.Client{Timeout: 5 * time.Second}), cf.UsingRetryPolicy(0, 0, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &cloudflare{client: client, zone: "example.test"}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { _, err := p.List(ctx, "node.example.test"); done <- err }()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("zone discovery did not start")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("in-flight cancellation: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("zone discovery ignored the caller cancellation")
 	}
 }

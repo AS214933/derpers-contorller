@@ -57,6 +57,32 @@ func Open(ctx context.Context, url, master string) (*Store, error) {
 	return s, nil
 }
 func (s *Store) Close() { s.Pool.Close() }
+
+// Lock uses a dedicated session; contention is reported instead of waiting
+// behind a long ACME operation. Always call release on the success path.
+func (s *Store) Lock(ctx context.Context, key string) (func(), error) {
+	conn, e := s.Pool.Acquire(ctx)
+	if e != nil {
+		return nil, e
+	}
+	var acquired bool
+	e = conn.QueryRow(ctx, "SELECT pg_try_advisory_lock(hashtextextended($1,0))", key).Scan(&acquired)
+	if e != nil || !acquired {
+		conn.Release()
+		if e == nil {
+			e = ErrConflict
+		}
+		return nil, e
+	}
+	return func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if _, e := conn.Exec(ctx, "SELECT pg_advisory_unlock(hashtextextended($1,0))", key); e != nil {
+			_ = conn.Conn().Close(context.Background())
+		}
+		conn.Release()
+	}, nil
+}
 func (s *Store) Migrate(ctx context.Context) error {
 	_, e := s.Pool.Exec(ctx, `CREATE TABLE IF NOT EXISTS resources(kind text NOT NULL,id text NOT NULL,owner_id text NOT NULL DEFAULT '',revision bigint NOT NULL DEFAULT 1,data jsonb NOT NULL,secret bytea,created_at timestamptz NOT NULL DEFAULT now(),PRIMARY KEY(kind,id));
  CREATE INDEX IF NOT EXISTS resources_owner ON resources(kind,owner_id);
