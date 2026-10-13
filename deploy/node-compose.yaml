@@ -2,7 +2,7 @@
 # Agent creates the latter two after enrollment, using the node's desired config.
 services:
   agent:
-    image: ghcr.io/as214933/derpers-contorller-agent:${IMAGE_VERSION:-v0.1.0}
+    image: ${AGENT_IMAGE:-ghcr.io/as214933/derpers-contorller-agent:${IMAGE_VERSION:-v0.1.0}}
     restart: unless-stopped
     environment:
       CONTROLLER_URL: ${CONTROLLER_URL:?set the controller HTTPS URL}
