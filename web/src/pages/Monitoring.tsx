@@ -28,9 +28,9 @@ import {
   PageTitle,
   Refresh,
   ResourceError,
-  StateTag,
 } from "../components";
 import { timestamp } from "../utils";
+import { ManagementTag, ProcessTags, RelayTag } from "../NodeHealth";
 
 export function Monitoring() {
   const config = useResource<{ grafana_url: string; prometheus_url: string }>(
@@ -161,11 +161,17 @@ export function Monitoring() {
                   <div className="monitor-node" key={node.id}>
                     <div className="monitor-node-top">
                       <strong>{node.name}</strong>
-                      <StateTag value={node.status} />
+                      <ManagementTag node={node} compact />
                     </div>
                     <span className="muted">
                       {node.region_name} · {node.hostname}
                     </span>
+                    <div style={{ marginTop: 12 }}>
+                      <RelayTag node={node} />
+                    </div>
+                    <div style={{ marginTop: 7 }}>
+                      <ProcessTags node={node} />
+                    </div>
                     <div className="monitor-node-version">
                       <span>已应用配置</span>
                       <strong>

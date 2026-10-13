@@ -20,14 +20,10 @@ import {
 } from "@ant-design/icons";
 import type { Audit, DERPNode, Network, User } from "../types";
 import { useResource } from "../hooks";
-import {
-  NoData,
-  PageTitle,
-  ResourceError,
-  StateTag,
-  StatCard,
-} from "../components";
+import { NoData, PageTitle, ResourceError, StatCard } from "../components";
 import { compact, timestamp } from "../utils";
+import { nodeHealth } from "../node-health";
+import { ManagementTag, RelayTag } from "../NodeHealth";
 
 export function Overview({
   user,
@@ -46,8 +42,11 @@ export function Overview({
   const pending =
     networks.data?.filter((n) => n.status === "pending").length || 0;
   const published = nodes.data?.filter((n) => n.published).length;
-  const online = nodes.data?.filter((n) =>
-    ["online", "healthy", "ready", "ok"].includes(n.status),
+  const online = nodes.data?.filter(
+    (n) => nodeHealth(n).management === "online",
+  ).length;
+  const healthy = nodes.data?.filter(
+    (n) => n.published && nodeHealth(n).relay === "healthy",
   ).length;
   const devices = networks.data?.reduce(
     (total, n) => total + n.device_count,
@@ -127,9 +126,9 @@ export function Overview({
         </Col>
         <Col xs={24} sm={12} xl={6}>
           <StatCard
-            label="在线节点"
-            value={online ?? "—"}
-            sub={user.admin ? "基于 Agent 最新状态" : "已发布节点运行状态"}
+            label="健康中继节点"
+            value={healthy ?? "—"}
+            sub={`实际 TLS 探测 · 管理在线 ${online ?? "—"} 个`}
             icon={<ThunderboltOutlined />}
             tone="green"
           />
@@ -193,9 +192,10 @@ export function Overview({
                         </div>
                       }
                       title={
-                        <Space>
+                        <Space wrap size={3}>
                           <strong>{node.name}</strong>
-                          <StateTag value={node.status} />
+                          <ManagementTag node={node} compact />
+                          <RelayTag node={node} compact />
                         </Space>
                       }
                       description={
