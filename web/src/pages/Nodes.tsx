@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   Badge,
@@ -51,7 +51,13 @@ import {
   StateTag,
   useActions,
 } from "../components";
-import { isPinnedImage, parseRecordIDs, timestamp } from "../utils";
+import {
+  generatedNodeHostname,
+  isPinnedImage,
+  parseRecordIDs,
+  timestamp,
+} from "../utils";
+import { ManagementTag, ProcessTags, RelayTag } from "../NodeHealth";
 import { MapExport } from "./Networks";
 
 const nodeFields = [
@@ -116,6 +122,9 @@ export function Nodes({ user }: { user: User }) {
   const [form] = Form.useForm();
   const [upgradeForm] = Form.useForm();
   const [importForm] = Form.useForm();
+  const manualHostname = useRef(false);
+  const nodeName = Form.useWatch("name", form);
+  const dnsAccountID = Form.useWatch("dns_account_id", form);
   const stunEnabled = Form.useWatch("stun_enabled", form);
   const detail = resource.data?.find((n) => n.id === detailID);
   const data = useMemo(
@@ -133,6 +142,7 @@ export function Nodes({ user }: { user: User }) {
   );
   useEffect(() => {
     if (editing !== undefined) {
+      manualHostname.current = Boolean(editing);
       form.resetFields();
       const regionID =
         Math.max(899, ...(resource.data || []).map((n) => n.region_id)) + 1;
@@ -141,6 +151,15 @@ export function Nodes({ user }: { user: User }) {
       );
     }
   }, [editing, form]); // Existing form input is preserved during background refresh.
+  useEffect(() => {
+    if (editing !== null || manualHostname.current) return;
+    const suffix = dns.data?.find(
+      (account) => account.id === dnsAccountID,
+    )?.suffix;
+    const hostname = generatedNodeHostname(nodeName, suffix);
+    if (hostname !== (form.getFieldValue("hostname") || ""))
+      form.setFieldValue("hostname", hostname);
+  }, [nodeName, dnsAccountID, dns.data, editing, form]);
   useEffect(() => {
     if (upgrade) {
       upgradeForm.resetFields();
@@ -259,10 +278,19 @@ export function Nodes({ user }: { user: User }) {
       ),
     },
     {
-      title: "运行状态",
-      dataIndex: "status",
+      title: "管理通道",
       width: 130,
-      render: (value) => <StateTag value={value} />,
+      render: (_, node) => <ManagementTag node={node} compact />,
+    },
+    {
+      title: "DERP 中继健康",
+      width: 150,
+      render: (_, node) => <RelayTag node={node} compact />,
+    },
+    {
+      title: "进程状态",
+      width: 180,
+      render: (_, node) => <ProcessTags node={node} />,
     },
     {
       title: "中继服务",
@@ -445,7 +473,7 @@ export function Nodes({ user }: { user: User }) {
           columns={columns}
           dataSource={data}
           loading={resource.loading}
-          scroll={{ x: user.admin ? 1450 : 870 }}
+          scroll={{ x: user.admin ? 1780 : 1200 }}
           pagination={{ pageSize: 10, showSizeChanger: true }}
           locale={{
             emptyText: (
@@ -576,14 +604,6 @@ export function Nodes({ user }: { user: User }) {
                 value: a.id,
                 label: `${a.name} · ${a.suffix}`,
               }))}
-              onChange={(id) => {
-                if (!form.getFieldValue("hostname")) {
-                  const account = dns.data?.find((a) => a.id === id);
-                  const name = form.getFieldValue("name");
-                  if (account && name)
-                    form.setFieldValue("hostname", `${name}.${account.suffix}`);
-                }
-              }}
             />
           </Form.Item>
           {dns.error && (
@@ -610,7 +630,12 @@ export function Nodes({ user }: { user: User }) {
               },
             ]}
           >
-            <Input placeholder="hk-01.derp.example.com" />
+            <Input
+              placeholder="hk-01.derp.example.com"
+              onChange={(event) => {
+                manualHostname.current = Boolean(event.target.value);
+              }}
+            />
           </Form.Item>
           <Row gutter={18}>
             <Col xs={24} sm={12}>
@@ -681,9 +706,15 @@ export function Nodes({ user }: { user: User }) {
             </Col>
           </Row>
           <Space wrap size={26}>
-            <Form.Item name="enabled" label="启用节点" valuePropName="checked">
-              <Switch />
-            </Form.Item>
+            {editing && (
+              <Form.Item
+                name="enabled"
+                label="启用节点"
+                valuePropName="checked"
+              >
+                <Switch />
+              </Form.Item>
+            )}
             <Form.Item
               name="stun_enabled"
               label="公开 STUN"
@@ -704,12 +735,12 @@ export function Nodes({ user }: { user: User }) {
               <Form.Item
                 name="derper_image"
                 label="DERP 镜像"
-              extra="镜像通过节点详情的升级任务修改，要求固定摘要并执行健康检查与失败回滚。"
+                extra="镜像通过节点详情的升级任务修改，要求固定摘要并执行健康检查与失败回滚。"
               >
-              <Input className="monospace" disabled />
+                <Input className="monospace" disabled />
               </Form.Item>
               <Form.Item name="caddy_image" label="Caddy 镜像">
-              <Input className="monospace" disabled />
+                <Input className="monospace" disabled />
               </Form.Item>
             </>
           )}
@@ -717,7 +748,7 @@ export function Nodes({ user }: { user: User }) {
             type="info"
             showIcon
             message="保存后部署节点"
-            description="准备 DNS 与证书 → 生成一次性注册令牌 → 下载 Compose → 在节点主机启动 → 检查状态后发布到 DERP Map。配置变化由 Agent 拉取并应用。"
+            description="新节点默认启用但尚未发布。准备 DNS 与证书 → 生成一次性注册令牌 → 下载 Compose → 在节点主机启动 → 检查状态后发布到 DERP Map。配置变化由 Agent 拉取并应用。"
           />
         </Form>
       </Modal>
@@ -735,7 +766,8 @@ export function Nodes({ user }: { user: User }) {
               </div>
               <h2>{detail.name}</h2>
               <Space>
-                <StateTag value={detail.status} />
+                <ManagementTag node={detail} />
+                <RelayTag node={detail} />
                 <Tag
                   color={detail.published ? "blue" : "default"}
                   bordered={false}
@@ -743,6 +775,9 @@ export function Nodes({ user }: { user: User }) {
                   {detail.published ? "已发布到 DERP Map" : "未发布"}
                 </Tag>
               </Space>
+              <div style={{ marginTop: 10 }}>
+                <ProcessTags node={detail} />
+              </div>
               <p>
                 {detail.hostname}:{detail.https_port}{" "}
                 <span className="dot-separator">·</span> {detail.region_name}

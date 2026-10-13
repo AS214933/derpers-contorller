@@ -5,6 +5,7 @@ import {
   isPinnedImage,
   networkInput,
   parseRecordIDs,
+  generatedNodeHostname,
 } from "./utils";
 import { parseMetrics, safeMonitoringURL } from "./metrics";
 
@@ -52,6 +53,17 @@ describe("credential write boundaries", () => {
   });
 });
 describe("deployment and map exports", () => {
+  it("derives a valid default node hostname once name and DNS suffix are available", () => {
+    expect(generatedNodeHostname(undefined, "derp.example.com")).toBe("");
+    expect(generatedNodeHostname("hk-01", undefined)).toBe("");
+    expect(generatedNodeHostname("HK-01", "derp.example.com")).toBe(
+      "hk-01.derp.example.com",
+    );
+    expect(generatedNodeHostname("US West 01", "derp.example.com")).toBe(
+      "us-west-01.derp.example.com",
+    );
+    expect(generatedNodeHostname("---", "derp.example.com")).toBe("");
+  });
   it("requires explicit DNS record IDs and deduplicates pasted lists", () => {
     expect(parseRecordIDs("123\n456,123，789")).toEqual(["123", "456", "789"]);
     expect(() => parseRecordIDs("")).toThrow();

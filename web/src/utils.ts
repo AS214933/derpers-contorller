@@ -80,3 +80,18 @@ export function parseRecordIDs(value: string): string[] {
     throw new Error("请填写 1–100 个有效 DNS 记录 ID，使用换行或逗号分隔。");
   return ids;
 }
+export function generatedNodeHostname(
+  name: string | undefined,
+  suffix: string | undefined,
+): string {
+  if (!name || !suffix) return "";
+  const label = name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 63)
+    .replace(/-+$/g, "");
+  return label ? `${label}.${suffix}` : "";
+}
