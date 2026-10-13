@@ -181,7 +181,16 @@ func (a *Agent) keepalive(ctx context.Context) {
 	}
 }
 
-func (a *Agent) recover(ctx context.Context) error {
+func (a *Agent) recover(ctx context.Context) (recoverErr error) {
+	pendingPath := filepath.Join(a.cfg.StateDir, "configuration.pending.json")
+	pendingData, pendingErr := os.ReadFile(pendingPath)
+	defer func() {
+		if recoverErr != nil && pendingErr == nil {
+			if err := atomicWrite(pendingPath, pendingData, 0600); err != nil {
+				recoverErr = errors.Join(recoverErr, fmt.Errorf("retain recovery journal: %w", err))
+			}
+		}
+	}()
 	if err := a.recoverConfiguration(); err != nil {
 		return err
 	}
@@ -219,7 +228,7 @@ func (a *Agent) recover(ctx context.Context) error {
 			}
 		}
 		record.Result.Status = "failed"
-		record.Result.Message = "agent restarted during task; restored any retained container; operation not repeated"
+		record.Result.Message = "agent restarted during task; recovery attempted; operation not repeated"
 		a.disk.Tasks[id] = record
 	}
 	return a.saveDisk()
@@ -250,7 +259,12 @@ func (a *Agent) synchronize(ctx context.Context) {
 		}
 	}
 	if err != nil {
-		a.status = "degraded"
+		var rollbackErr *rollbackFailure
+		if errors.As(err, &rollbackErr) {
+			a.status = "rollback_failed"
+		} else {
+			a.status = "degraded"
+		}
 		a.logger.Error("reconcile node configuration", "error", a.safe(err.Error()))
 	} else {
 		a.status = "ready"
@@ -277,21 +291,33 @@ func (a *Agent) report(ctx context.Context) {
 		report.Revision = a.applied.Revision
 		for _, component := range []string{"caddy", "derper"} {
 			statsCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-			stats, err := a.docker.Stats(statsCtx, a.componentName(component), a.identity.NodeID)
+			info, err := a.docker.Inspect(statsCtx, a.componentName(component), a.identity.NodeID)
+			report.Metrics[component+"_process_up"] = 0
+			var stats map[string]float64
+			if err == nil && info.State.Running {
+				report.Metrics[component+"_process_up"] = 1
+				stats, err = a.docker.Stats(statsCtx, a.componentName(component), a.identity.NodeID)
+			}
 			cancel()
 			if err == nil {
-				report.Metrics[component+"_up"] = 1
 				for key, value := range stats {
 					report.Metrics[component+"_"+key] = value
 				}
-			} else {
-				report.Metrics[component+"_up"] = 0
 			}
 		}
-		metricsCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		report.Metrics["derper_up"] = 0
+		probeCtx, stopProbe := context.WithTimeout(ctx, 3*time.Second)
+		if a.probeRelay(probeCtx, *a.applied) == nil {
+			report.Metrics["derper_up"] = 1
+		}
+		stopProbe()
+		report.Metrics["derper_probe_timestamp_seconds"] = float64(time.Now().Unix())
+		report.Metrics["derper_metrics_up"] = 0
+		metricsCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 		text, err := a.docker.Exec(metricsCtx, a.derperName(), a.identity.NodeID, []string{"/usr/local/bin/derper-entrypoint", "metrics"})
 		cancel()
 		if err == nil {
+			report.Metrics["derper_metrics_up"] = 1
 			parsed := parseMetrics(text)
 			keys := make([]string, 0, len(parsed))
 			for key := range parsed {
@@ -301,12 +327,11 @@ func (a *Agent) report(ctx context.Context) {
 			}
 			sort.Strings(keys)
 			for _, key := range keys {
-				if len(report.Metrics) >= 63 {
+				if len(report.Metrics) >= 64 {
 					break
 				}
 				report.Metrics["derper_"+key] = parsed[key]
 			}
-			report.Metrics["derper_up"] = 1
 		}
 	}
 	ids := make([]string, 0, len(a.disk.Tasks))

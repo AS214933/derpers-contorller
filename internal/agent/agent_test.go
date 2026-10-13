@@ -19,10 +19,12 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -452,5 +454,110 @@ func TestManagedCaddyUsesOfficialImageCommandAndPrivatePorts(t *testing.T) {
 	bindings := spec.HostConfig["PortBindings"].(map[string][]map[string]string)
 	if len(bindings) != 1 || bindings["80/tcp"] == nil {
 		t.Fatalf("internal Caddy port exposed: %#v", bindings)
+	}
+}
+
+func TestReportSeparatesProcessRelayAndMetricsHealth(t *testing.T) {
+	var probeStatus atomic.Int32
+	probeStatus.Store(200)
+	relay := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/derp/probe" {
+			t.Errorf("unexpected probe %s", r.URL.Path)
+		}
+		w.WriteHeader(int(probeStatus.Load()))
+	}))
+	defer relay.Close()
+	var metricsFail atomic.Bool
+	dockerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/stats"):
+			io.WriteString(w, `{"memory_stats":{"usage":1,"limit":100},"cpu_stats":{"cpu_usage":{"total_usage":10}}}`)
+		case strings.HasSuffix(r.URL.Path, "/exec"):
+			if metricsFail.Load() {
+				http.Error(w, "metrics command unavailable", 500)
+				return
+			}
+			io.WriteString(w, `{"Id":"metrics-1"}`)
+		case strings.HasPrefix(r.URL.Path, "/v1.47/exec/") && strings.HasSuffix(r.URL.Path, "/start"):
+			io.WriteString(w, "derp_bytes_sent 42\n")
+		case strings.HasPrefix(r.URL.Path, "/v1.47/exec/"):
+			io.WriteString(w, `{"ExitCode":0,"Running":false}`)
+		default:
+			component := "derper"
+			if strings.Contains(r.URL.Path, "/caddy/") {
+				component = "caddy"
+			}
+			info := containerInfo{Config: containerConfig{Labels: map[string]string{"derpers.node_id": "node-1", "derpers.component": component}}}
+			info.State.Running = true
+			json.NewEncoder(w).Encode(info)
+		}
+	}))
+	defer dockerServer.Close()
+	reports := make(chan model.Report, 3)
+	controller := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var report model.Report
+		if err := json.NewDecoder(r.Body).Decode(&report); err != nil {
+			t.Error(err)
+		}
+		reports <- report
+		w.WriteHeader(204)
+	}))
+	defer controller.Close()
+	docker, _ := NewDocker(dockerServer.URL)
+	origin, _ := url.Parse(relay.URL)
+	port, _ := strconv.Atoi(origin.Port())
+	ca := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: relay.Certificate().Raw}))
+	a := &Agent{cfg: Config{ControllerURL: controller.URL, DerperContainer: "derper", CaddyContainer: "caddy"}, identity: identity{NodeID: "node-1"}, docker: docker, client: controller.Client(), status: "ready", logger: slog.New(slog.NewTextHandler(io.Discard, nil)), applied: &model.NodeConfig{NodeID: "node-1", Revision: 1, Hostname: origin.Hostname(), HTTPSPort: port, CAPEM: ca}}
+	for _, scenario := range []struct {
+		name               string
+		metricsFail        bool
+		status             int
+		trust              bool
+		relayUp, metricsUp float64
+	}{
+		{"metrics failure preserves actual relay health", true, 200, true, 1, 0},
+		{"HTTP probe failure cannot inherit process health", false, 503, true, 0, 1},
+		{"TLS failure cannot inherit process or metrics health", false, 200, false, 0, 1},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			metricsFail.Store(scenario.metricsFail)
+			probeStatus.Store(int32(scenario.status))
+			a.applied.CAPEM = ""
+			if scenario.trust {
+				a.applied.CAPEM = ca
+			}
+			a.report(context.Background())
+			report := <-reports
+			if report.Metrics["derper_process_up"] != 1 || report.Metrics["caddy_process_up"] != 1 {
+				t.Fatalf("Docker process state was lost: %#v", report.Metrics)
+			}
+			if report.Metrics["derper_up"] != scenario.relayUp || report.Metrics["derper_metrics_up"] != scenario.metricsUp {
+				t.Fatalf("conflated independent health signals: %#v", report.Metrics)
+			}
+			if _, exists := report.Metrics["caddy_up"]; exists {
+				t.Fatal("Caddy process state was advertised as upstream health")
+			}
+			if report.Metrics["derper_probe_timestamp_seconds"] <= 0 || len(report.Metrics) > 64 {
+				t.Fatal("missing freshness or oversized health report")
+			}
+		})
+	}
+}
+
+func TestRelayProbeHonorsShortDeadline(t *testing.T) {
+	relay := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { <-r.Context().Done() }))
+	defer relay.Close()
+	origin, _ := url.Parse(relay.URL)
+	port, _ := strconv.Atoi(origin.Port())
+	config := model.NodeConfig{Hostname: origin.Hostname(), HTTPSPort: port, CAPEM: string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: relay.Certificate().Raw}))}
+	a := &Agent{applied: &config}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if err := a.probeRelay(ctx, config); err == nil {
+		t.Fatal("stalled probe reported healthy")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("probe ignored deadline: %s", elapsed)
 	}
 }

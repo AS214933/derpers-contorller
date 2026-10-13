@@ -202,6 +202,15 @@ func (d *Docker) Restart(ctx context.Context, name, nodeID string) error {
 	return d.action(ctx, http.MethodPost, "/containers/"+url.PathEscape(name)+"/restart?t=10", nil)
 }
 
+func (d *Docker) Remove(ctx context.Context, name, nodeID string) error {
+	if _, err := d.Inspect(ctx, name, nodeID); errors.Is(err, errDockerNotFound) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	return d.action(ctx, http.MethodDelete, "/containers/"+url.PathEscape(name)+"?force=true", nil)
+}
+
 func (d *Docker) Ensure(ctx context.Context, name, nodeID string, spec containerSpec, health func(context.Context) error) error {
 	current, err := d.Inspect(ctx, name, nodeID)
 	if errors.Is(err, errDockerNotFound) {
