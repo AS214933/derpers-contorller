@@ -11,7 +11,12 @@ FROM ${GOLANG_IMAGE} AS build
 WORKDIR /src
 RUN apk add --no-cache git
 COPY go.mod go.sum ./
-RUN go mod download
+# Retry transient proxy transport failures without bypassing module checksums.
+RUN for download_attempt in 1 2 3; do \
+      if go mod download; then break; fi; \
+      if [ "$download_attempt" -eq 3 ]; then exit 1; fi; \
+      sleep "$((download_attempt * 3))"; \
+    done
 COPY . .
 RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/controller ./cmd/controller && \
     CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/agent ./cmd/agent
