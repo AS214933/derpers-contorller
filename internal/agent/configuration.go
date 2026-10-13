@@ -252,10 +252,7 @@ func (a *Agent) beginConfiguration(config model.NodeConfig, files map[string][]b
 		return nil, errors.Join(err, restoreErr)
 	}
 	return func() error {
-		if err := rollbackFiles(); err != nil {
-			return err
-		}
-		return os.Remove(journalPath)
+		return rollbackFiles()
 	}, nil
 }
 
@@ -327,6 +324,11 @@ func applyFiles(files map[string][]byte) (func() error, error) {
 }
 
 func (a *Agent) applyConfig(ctx context.Context, c model.NodeConfig) error {
+	if _, err := os.Stat(filepath.Join(a.cfg.StateDir, "configuration.pending.json")); err == nil {
+		return &rollbackFailure{cause: errors.New("previous recovery journal is pending; restore Docker/filesystem availability and restart the agent")}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
 	if c.ControllerURL == "" {
 		c.ControllerURL = a.cfg.ControllerURL
 	}
@@ -343,20 +345,18 @@ func (a *Agent) applyConfig(ctx context.Context, c model.NodeConfig) error {
 	if err != nil {
 		return err
 	}
+	previous := a.applied
 	rollback, err := a.beginConfiguration(c, files)
 	if err != nil {
 		return err
 	}
 	if err := os.MkdirAll(filepath.Join(a.cfg.ConfigDir, "derper-state"), 0700); err != nil {
-		_ = rollback()
-		return err
+		return a.configurationFailed(err, previous, rollback)
 	}
-	previous := a.applied
 	a.applied = &c
 	if err := a.authenticatedClient(); err != nil {
 		a.applied = previous
-		_ = rollback()
-		return err
+		return a.configurationFailed(err, previous, rollback)
 	}
 	if a.cfg.ManageContainers {
 		for _, component := range []string{"caddy", "derper"} {
@@ -371,42 +371,80 @@ func (a *Agent) applyConfig(ctx context.Context, c model.NodeConfig) error {
 		}
 	}
 	if err != nil {
-		a.applied = previous
-		rollbackErr := rollback()
-		_ = a.authenticatedClient()
-		// File contents are shared bind mounts. Restart originals after restoring
-		// them so both processes load the previous certificate and configuration.
-		if previous != nil && a.cfg.ManageContainers {
-			recoveryCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-			for _, component := range []string{"caddy", "derper"} {
-				_ = a.docker.Ensure(recoveryCtx, a.componentName(component), a.identity.NodeID, a.containerSpec(*previous, component), a.healthCheck(component, *previous))
-				_ = a.docker.Restart(recoveryCtx, a.componentName(component), a.identity.NodeID)
-			}
-			cancel()
-		}
-		if rollbackErr != nil {
-			return fmt.Errorf("%w; restore configuration: %v", err, rollbackErr)
-		}
-		return err
+		return a.configurationFailed(err, previous, rollback)
 	}
 	a.disk.Applied = &c
 	if err := a.saveDisk(); err != nil {
 		a.disk.Applied = previous
-		a.applied = previous
-		rollbackErr := rollback()
-		_ = a.authenticatedClient()
-		if previous != nil && a.cfg.ManageContainers {
-			recoveryCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-			for _, component := range []string{"caddy", "derper"} {
-				_ = a.docker.Ensure(recoveryCtx, a.componentName(component), a.identity.NodeID, a.containerSpec(*previous, component), a.healthCheck(component, *previous))
-				_ = a.docker.Restart(recoveryCtx, a.componentName(component), a.identity.NodeID)
-			}
-			cancel()
-		}
-		return errors.Join(fmt.Errorf("commit node configuration: %w", err), rollbackErr)
+		return a.configurationFailed(fmt.Errorf("commit node configuration: %w", err), previous, rollback)
 	}
 	if err := os.Remove(filepath.Join(a.cfg.StateDir, "configuration.pending.json")); err != nil {
 		a.logger.Warn("remove committed configuration journal", "error", err)
+	}
+	return nil
+}
+
+type rollbackFailure struct{ cause error }
+
+func (e *rollbackFailure) Error() string {
+	return "rollback failed; previous configuration and recovery journal retained: " + e.cause.Error()
+}
+func (e *rollbackFailure) Unwrap() error { return e.cause }
+
+func (a *Agent) configurationFailed(cause error, previous *model.NodeConfig, restoreFiles func() error) error {
+	a.applied = previous
+	a.disk.Applied = previous
+	if err := a.restorePrevious(previous, restoreFiles); err != nil {
+		return &rollbackFailure{cause: errors.Join(cause, err)}
+	}
+	if previous == nil {
+		return fmt.Errorf("initial configuration failed; partial managed deployment removed: %w", cause)
+	}
+	return fmt.Errorf("configuration update failed; previous configuration restored and health checked: %w", cause)
+}
+
+func (a *Agent) restorePrevious(previous *model.NodeConfig, restoreFiles func() error) error {
+	if err := restoreFiles(); err != nil {
+		return fmt.Errorf("restore configuration files: %w", err)
+	}
+	var failures []error
+	if err := a.authenticatedClient(); err != nil {
+		failures = append(failures, fmt.Errorf("restore controller trust: %w", err))
+	}
+	if a.cfg.ManageContainers {
+		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+		defer cancel()
+		for _, component := range []string{"caddy", "derper"} {
+			name := a.componentName(component)
+			if previous == nil {
+				if err := a.docker.Remove(ctx, name, a.identity.NodeID); err != nil {
+					failures = append(failures, fmt.Errorf("remove partial %s: %w", component, err))
+				}
+				continue
+			}
+			// A retained process can still have newer arguments cached (for
+			// example, a changed listening port). Load the restored files before
+			// requiring the old endpoint to pass its final health probe.
+			if err := a.docker.Ensure(ctx, name, a.identity.NodeID, a.containerSpec(*previous, component), func(context.Context) error { return nil }); err != nil {
+				failures = append(failures, fmt.Errorf("restore %s container: %w", component, err))
+				continue
+			}
+			// A restored container may have restarted before file rollback and
+			// cached the newer TLS certificate. Reload files, then verify again.
+			if err := a.docker.Restart(ctx, name, a.identity.NodeID); err != nil {
+				failures = append(failures, fmt.Errorf("restart restored %s: %w", component, err))
+				continue
+			}
+			if err := a.healthCheck(component, *previous)(ctx); err != nil {
+				failures = append(failures, fmt.Errorf("verify restored %s: %w", component, err))
+			}
+		}
+	}
+	if err := errors.Join(failures...); err != nil {
+		return err
+	}
+	if err := os.Remove(filepath.Join(a.cfg.StateDir, "configuration.pending.json")); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove recovered configuration journal: %w", err)
 	}
 	return nil
 }
@@ -425,7 +463,23 @@ func (a *Agent) componentName(component string) string {
 }
 
 func (a *Agent) containerSpec(c model.NodeConfig, component string) containerSpec {
-	body, _ := json.Marshal(c)
+	var configuration any
+	if component == "caddy" {
+		trust, err := os.ReadFile(filepath.Join(a.cfg.StateDir, "server-ca.crt"))
+		if err != nil {
+			trust = []byte(c.CAPEM)
+			if data, err := os.ReadFile(a.cfg.ControllerCAFile); err == nil {
+				trust = append(trust, data...)
+			}
+		}
+		configuration = struct{ Config, Trust string }{caddyConfiguration(c, a.cfg.ControllerURL), string(trust)}
+	} else {
+		configuration = struct {
+			Args                               []string
+			Certificate, PrivateKey, DerperKey string
+		}{derperArguments(c), c.CertificatePEM, c.CertificateKeyPEM, c.DerperKey}
+	}
+	body, _ := json.Marshal(configuration)
 	configHash := sha256.Sum256(body)
 	spec := containerSpec{containerConfig: containerConfig{
 		Image: c.DerperImage, Env: []string{"DERPER_ARGS_FILE=/node/derper-args.json"},
@@ -485,21 +539,7 @@ func (a *Agent) healthCheck(component string, c model.NodeConfig) func(context.C
 				if component == "caddy" {
 					_, err = a.docker.Exec(ctx, a.caddyName(), a.identity.NodeID, []string{"caddy", "validate", "--config", "/node/Caddyfile", "--adapter", "caddyfile"})
 				} else {
-					roots, _, rootErr := a.tlsRoots()
-					if rootErr != nil {
-						return rootErr
-					}
-					client := &http.Client{Timeout: 3 * time.Second, CheckRedirect: rejectRedirect, Transport: &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots}}}
-					req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+c.Hostname+":"+strconv.Itoa(c.HTTPSPort)+"/derp/probe", nil)
-					resp, probeErr := client.Do(req)
-					if probeErr == nil {
-						resp.Body.Close()
-						if resp.StatusCode != http.StatusOK {
-							probeErr = fmt.Errorf("probe HTTP %d", resp.StatusCode)
-						}
-					}
-					client.CloseIdleConnections()
-					err = probeErr
+					err = a.probeRelay(ctx, c)
 				}
 				if err == nil {
 					return nil
@@ -515,4 +555,26 @@ func (a *Agent) healthCheck(component string, c model.NodeConfig) func(context.C
 			}
 		}
 	}
+}
+
+func (a *Agent) probeRelay(ctx context.Context, c model.NodeConfig) error {
+	roots, _, err := a.tlsRoots()
+	if err != nil {
+		return err
+	}
+	client := &http.Client{Timeout: 3 * time.Second, CheckRedirect: rejectRedirect, Transport: &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots}}}
+	defer client.CloseIdleConnections()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+c.Hostname+":"+strconv.Itoa(c.HTTPSPort)+"/derp/probe", nil)
+	if err != nil {
+		return err
+	}
+	response, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("DERP probe HTTP %d", response.StatusCode)
+	}
+	return nil
 }

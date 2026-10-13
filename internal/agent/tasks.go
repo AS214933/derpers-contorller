@@ -92,7 +92,7 @@ func (a *Agent) applyConfigurationWithTasks(ctx context.Context, config model.No
 		record := a.disk.Tasks[id]
 		if err != nil {
 			record.Result.Status = "failed"
-			record.Result.Message = a.safe("upgrade failed and previous configuration restored: " + err.Error())
+			record.Result.Message = a.safe("upgrade failed: " + err.Error())
 		} else {
 			record.Result.Status = "succeeded"
 			record.Result.Message = "desired image and configuration applied and health checked"
