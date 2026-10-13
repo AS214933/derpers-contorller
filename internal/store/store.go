@@ -223,9 +223,13 @@ func (s *Store) QueueNodeTask(ctx context.Context, n model.Node, t model.Task) e
 	}
 	defer tx.Rollback(ctx)
 	var revision int64
-	e = tx.QueryRow(ctx, "SELECT revision FROM resources WHERE kind='node' AND id=$1 FOR UPDATE", n.ID).Scan(&revision)
+	var enabled bool
+	e = tx.QueryRow(ctx, "SELECT revision,COALESCE((data->>'enabled')::boolean,false) FROM resources WHERE kind='node' AND id=$1 FOR UPDATE", n.ID).Scan(&revision, &enabled)
 	if e != nil {
 		return e
+	}
+	if !enabled {
+		return ErrConflict
 	}
 	if t.Type == "upgrade" {
 		if revision != n.Revision-1 {

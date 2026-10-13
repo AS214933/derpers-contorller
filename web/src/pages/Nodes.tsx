@@ -59,6 +59,12 @@ import {
 } from "../utils";
 import { ManagementTag, ProcessTags, RelayTag } from "../NodeHealth";
 import { MapExport } from "./Networks";
+import {
+  deploymentCommands,
+  deploymentDirectory,
+  deploymentEnvironment,
+  nodeControls,
+} from "../node-admin";
 
 const nodeFields = [
   "name",
@@ -107,13 +113,14 @@ export function Nodes({ user }: { user: User }) {
   const dns = useResource<DNSAccount[]>(
     user.admin ? "/api/v1/dns-accounts" : null,
   );
-  const { run, busy, confirm } = useActions();
+  const { run, busy, confirm, message } = useActions();
   const [search, setSearch] = useState("");
   const [editing, setEditing] = useState<DERPNode | null | undefined>();
   const [detailID, setDetailID] = useState<string>();
   const [token, setToken] = useState<{ token: string; node_id: string }>();
   const [deployment, setDeployment] = useState<{
     name: string;
+    node_id: string;
     text: string;
   }>();
   const [upgrade, setUpgrade] = useState<DERPNode>();
@@ -174,6 +181,13 @@ export function Nodes({ user }: { user: User }) {
     type: string,
     payload: Record<string, unknown>,
   ) {
+    const current = resource.data?.find((n) => n.id === node.id) || node;
+    if (!nodeControls(current).canQueueTasks) {
+      void message.warning(
+        "节点已停用，无法提交新的重启、升级或日志任务。请先重新启用节点。",
+      );
+      return Promise.resolve(undefined);
+    }
     return run(
       `${type}:${node.id}`,
       () =>
@@ -313,8 +327,11 @@ export function Nodes({ user }: { user: User }) {
             title: "发布状态",
             width: 120,
             render: (_: unknown, node: DERPNode) => (
-              <Tag bordered={false} color={node.published ? "blue" : "default"}>
-                {node.published ? "已发布" : "未发布"}
+              <Tag
+                bordered={false}
+                color={nodeControls(node).inMap ? "blue" : "default"}
+              >
+                {nodeControls(node).publication}
               </Tag>
             ),
           },
@@ -370,6 +387,7 @@ export function Nodes({ user }: { user: User }) {
                     icon={
                       node.published ? <PoweroffOutlined /> : <UploadOutlined />
                     }
+                    disabled={!node.enabled && !node.published}
                     loading={
                       busy[
                         `${node.published ? "unpublish" : "publish"}:${node.id}`
@@ -391,7 +409,7 @@ export function Nodes({ user }: { user: User }) {
                       onClick={() =>
                         confirm(
                           `删除节点“${node.name}”？`,
-                          "节点身份将失效。请在主机上另外停止部署的容器。平台不会删除节点主机上的数据目录。",
+                          "节点身份将失效，同时删除此节点由平台拥有的 A/AAAA DNS 记录，域名可能因此无法解析。请在主机上另外停止部署的容器；平台不会删除节点主机上的数据目录。",
                           async () => {
                             await mutate(`/api/v1/nodes/${node.id}`, "DELETE");
                             if (detailID === node.id) setDetailID(undefined);
@@ -769,10 +787,10 @@ export function Nodes({ user }: { user: User }) {
                 <ManagementTag node={detail} />
                 <RelayTag node={detail} />
                 <Tag
-                  color={detail.published ? "blue" : "default"}
+                  color={nodeControls(detail).inMap ? "blue" : "default"}
                   bordered={false}
                 >
-                  {detail.published ? "已发布到 DERP Map" : "未发布"}
+                  {nodeControls(detail).publication}
                 </Tag>
               </Space>
               <div style={{ marginTop: 10 }}>
@@ -783,6 +801,15 @@ export function Nodes({ user }: { user: User }) {
                 <span className="dot-separator">·</span> {detail.region_name}
               </p>
             </div>
+            {!detail.enabled && (
+              <Alert
+                type="warning"
+                showIcon
+                className="form-alert"
+                message="节点已停用，当前不参与 DERP Map"
+                description="节点身份不能访问控制器，新重启、升级和日志任务已禁用。重新启用后，停用之前已排队的任务可能继续执行；需要移除发布标记时仍可取消发布。"
+              />
+            )}
             <Tabs
               items={[
                 {
@@ -870,7 +897,9 @@ export function Nodes({ user }: { user: User }) {
                           <div className="node-action-grid">
                             <Button
                               icon={<GlobalIcon />}
-                              disabled={!detail.dns_account_id}
+                              disabled={
+                                !detail.enabled || !detail.dns_account_id
+                              }
                               loading={busy[`provision:${detail.id}`]}
                               onClick={() => provision(detail)}
                             >
@@ -912,7 +941,11 @@ export function Nodes({ user }: { user: User }) {
                                     ),
                                   undefined,
                                   (text) =>
-                                    setDeployment({ name: detail.name, text }),
+                                    setDeployment({
+                                      name: detail.name,
+                                      node_id: detail.id,
+                                      text,
+                                    }),
                                 )
                               }
                             >
@@ -926,6 +959,7 @@ export function Nodes({ user }: { user: User }) {
                             </Button>
                             <Button
                               icon={<ReloadOutlined />}
+                              disabled={!nodeControls(detail).canQueueTasks}
                               loading={busy[`restart:${detail.id}`]}
                               onClick={() => restart(detail)}
                             >
@@ -933,12 +967,14 @@ export function Nodes({ user }: { user: User }) {
                             </Button>
                             <Button
                               icon={<ReloadOutlined />}
+                              disabled={!nodeControls(detail).canQueueTasks}
                               onClick={() => restart(detail, "caddy")}
                             >
                               重启 Caddy
                             </Button>
                             <Button
                               icon={<RocketOutlined />}
+                              disabled={!nodeControls(detail).canQueueTasks}
                               onClick={() => setUpgrade(detail)}
                             >
                               升级组件
@@ -951,6 +987,7 @@ export function Nodes({ user }: { user: User }) {
                                   <UploadOutlined />
                                 )
                               }
+                              disabled={!detail.enabled && !detail.published}
                               loading={
                                 busy[
                                   `${detail.published ? "unpublish" : "publish"}:${detail.id}`
@@ -1053,6 +1090,7 @@ export function Nodes({ user }: { user: User }) {
                               <Space>
                                 <Button
                                   icon={<FileTextOutlined />}
+                                  disabled={!nodeControls(detail).canQueueTasks}
                                   loading={busy[`logs:${detail.id}`]}
                                   onClick={() =>
                                     void task(detail, "logs", {
@@ -1065,6 +1103,7 @@ export function Nodes({ user }: { user: User }) {
                                 </Button>
                                 <Button
                                   icon={<FileTextOutlined />}
+                                  disabled={!nodeControls(detail).canQueueTasks}
                                   onClick={() =>
                                     void task(detail, "logs", {
                                       component: "caddy",
@@ -1172,16 +1211,12 @@ export function Nodes({ user }: { user: User }) {
           type="warning"
           showIcon
           message="令牌只在本次显示"
-          description="将其作为节点 Compose 的 ENROLLMENT_TOKEN。不要发到聊天、版本库或日志中；使用成功后令牌立即失效。"
+          description="下载 node.env，与 compose.yaml 放在同一目录。文件包含必填的绝对 NODE_DIR、一次性令牌和控制器信任配置。不要发到聊天、版本库或日志中；令牌使用成功后立即失效。"
           className="form-alert"
         />
         <CodeBlock
-          text={
-            token
-              ? `ENROLLMENT_TOKEN=${token.token}\nNODE_ID=${token.node_id}\n`
-              : ""
-          }
-          filename="node-enrollment.env"
+          text={token ? deploymentEnvironment(token.node_id, token.token) : ""}
+          filename="node.env"
         />
       </Modal>
       <Modal
@@ -1196,13 +1231,18 @@ export function Nodes({ user }: { user: User }) {
           type="info"
           showIcon
           message="在节点主机使用 Docker Compose 部署"
-          description="保存为 compose.yaml，按文件中的说明配置 .env 和主机目录，并填写一次性注册令牌，然后执行 docker compose up -d。Agent 需要 Docker socket 管理本节点容器。"
+          description="将 compose.yaml 与注册令牌弹窗下载的 node.env 放在节点主机同一目录。NODE_DIR 必须是该主机的绝对目录；Agent 需要 Docker socket 管理本节点容器。私有控制器 CA 须另外放入 trust/controller-ca.crt 并在 node.env 设置 CONTROLLER_CA_FILE=/trust/controller-ca.crt。"
           className="form-alert"
         />
+        <Detail label="本节点目录样例">
+          <Typography.Text copyable>
+            {deployment ? deploymentDirectory(deployment.node_id) : ""}
+          </Typography.Text>
+        </Detail>
         <CodeBlock
-          text={deployment?.text || ""}
-          filename={`${deployment?.name || "derp"}-compose.yaml`}
+          text={deployment ? deploymentCommands(deployment.node_id) : ""}
         />
+        <CodeBlock text={deployment?.text || ""} filename="compose.yaml" />
       </Modal>
       <Modal
         open={Boolean(upgrade)}
