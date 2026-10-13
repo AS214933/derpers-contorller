@@ -1,7 +1,7 @@
 ARG GOLANG_IMAGE=golang:1.27.1-alpine@sha256:8a5910f31396cd4d89662f56c68b3ae31d374308270a1c3bd96672ee5ed43414
 ARG ALPINE_IMAGE=alpine:3.22@sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8
 FROM ${GOLANG_IMAGE} AS build
-ARG TAILSCALE_COMMIT=7f4efe814ff14b064eb080344389ceb9ea2d37ac
+ARG TAILSCALE_COMMIT=9a522a9786c97eb7910c01ccb7bd66557b04c910
 RUN apk add --no-cache git
 WORKDIR /src
 RUN git init && git remote add origin https://github.com/tailscale/tailscale.git && \
