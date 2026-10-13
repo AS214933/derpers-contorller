@@ -1,0 +1,28 @@
+ARG GOLANG_IMAGE=golang:1.27.1-alpine@sha256:8a5910f31396cd4d89662f56c68b3ae31d374308270a1c3bd96672ee5ed43414
+ARG ALPINE_IMAGE=alpine:3.22@sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8
+FROM ${GOLANG_IMAGE} AS build
+ARG TAILSCALE_COMMIT=7f4efe814ff14b064eb080344389ceb9ea2d37ac
+RUN apk add --no-cache git
+WORKDIR /src
+RUN git init && git remote add origin https://github.com/tailscale/tailscale.git && \
+    git fetch --depth=1 origin ${TAILSCALE_COMMIT} && git checkout --detach FETCH_HEAD && \
+    test "$(git rev-parse HEAD)" = "${TAILSCALE_COMMIT}"
+COPY tools/derper-entrypoint.go /entrypoint/main.go
+COPY e2e/derp-probe/main.go ./cmd/derpers-probe/main.go
+RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/derper ./cmd/derper && \
+    CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/tailscale ./cmd/tailscale && \
+    CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/tailscaled ./cmd/tailscaled && \
+    CGO_ENABLED=0 go build -tags=e2eprobe -trimpath -ldflags='-s -w' -o /out/derp-probe ./cmd/derpers-probe && \
+    CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/derper-entrypoint /entrypoint/main.go
+FROM ${ALPINE_IMAGE} AS runtime
+RUN apk add --no-cache ca-certificates tzdata
+FROM runtime AS derper
+COPY --from=build /out/derper /out/derper-entrypoint /usr/local/bin/
+EXPOSE 443 3478/udp
+ENTRYPOINT ["/usr/local/bin/derper-entrypoint"]
+FROM runtime AS e2e-client
+RUN apk add --no-cache iproute2 iptables ip6tables iputils curl jq
+COPY --from=build /out/tailscale /out/tailscaled /out/derp-probe /usr/local/bin/
+COPY e2e/client-entrypoint.sh /usr/local/bin/client-entrypoint
+RUN chmod +x /usr/local/bin/client-entrypoint
+ENTRYPOINT ["/usr/local/bin/client-entrypoint"]

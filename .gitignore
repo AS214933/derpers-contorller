@@ -1,0 +1,15 @@
+/.cache/
+/bin/
+/web/node_modules/
+/web/dist/
+/runtime/
+/e2e/artifacts/
+/.e2e/
+/artifacts/
+/deploy/secrets/
+/deploy/grafana-data/
+*.exe
+*.test
+.env
+coverage.out
+

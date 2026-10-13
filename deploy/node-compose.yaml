@@ -1,0 +1,28 @@
+# Three containers run on the node: this Agent and its managed derper + Caddy.
+# Agent creates the latter two after enrollment, using the node's desired config.
+services:
+  agent:
+    image: ghcr.io/as214933/derpers-contorller-agent:${IMAGE_VERSION:-edge}
+    restart: unless-stopped
+    environment:
+      CONTROLLER_URL: ${CONTROLLER_URL:?set the controller HTTPS URL}
+      ENROLLMENT_TOKEN: ${ENROLLMENT_TOKEN:?generate a single-use node token}
+      CONTROLLER_CA_FILE: ${CONTROLLER_CA_FILE:-}
+      NODE_ID: ${NODE_ID:?copy the node id from the controller}
+      CONFIG_DIR: /node
+      STATE_DIR: /var/lib/derpers-agent
+      HOST_CONFIG_DIR: ${HOST_CONFIG_DIR:?absolute host path required}
+      HOST_STATE_DIR: ${HOST_STATE_DIR:?absolute host path required}
+      DOCKER_NETWORK: ${DOCKER_NETWORK:-derpers-node}
+      DERPER_CONTAINER: ${DERPER_CONTAINER:-derpers-derper}
+      CADDY_CONTAINER: ${CADDY_CONTAINER:-derpers-caddy}
+      MANAGE_CONTAINERS: "true"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${HOST_CONFIG_DIR}:/node
+      - ${HOST_STATE_DIR}:/var/lib/derpers-agent
+      - ${TRUST_DIR:-./secrets}:/trust:ro
+    networks: [node]
+networks:
+  node:
+    name: ${DOCKER_NETWORK:-derpers-node}

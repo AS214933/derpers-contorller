@@ -1,0 +1,13 @@
+name: Promote verified release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+  actions: read
+  packages: write
+jobs:
+  promote:
+    uses: ./.github/workflows/publish.yml
+    with:
+      mode: promote

@@ -1,0 +1,57 @@
+services:
+  postgres:
+    image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: derpers
+      POSTGRES_DB: derpers
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?run deploy/bootstrap.sh first}
+    volumes:
+      - postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U derpers -d derpers"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    networks: [private]
+  controller:
+    image: ghcr.io/as214933/derpers-contorller-controller:${IMAGE_VERSION:-edge}
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://derpers:${POSTGRES_PASSWORD}@postgres:5432/derpers?sslmode=disable
+      MASTER_KEY: ${MASTER_KEY:?run deploy/bootstrap.sh first}
+      CONTROLLER_URL: ${CONTROLLER_URL:-https://localhost:8443}
+      HTTP_ADDR: :8080
+      TLS_ADDR: :8443
+      TLS_CERT_FILE: /certs/server.crt
+      TLS_KEY_FILE: /certs/server.key
+      NODE_CA_CERT_FILE: /certs/node-ca.crt
+      NODE_CA_KEY_FILE: /certs/node-ca.key
+      HEADSCALE_ALLOWED_CIDRS: ${HEADSCALE_ALLOWED_CIDRS:-}
+      OIDC_ISSUER: ${OIDC_ISSUER:-}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
+      OIDC_ADMIN_GROUPS: ${OIDC_ADMIN_GROUPS:-derpers-admin}
+      PUBLIC_URL: ${PUBLIC_URL:-https://localhost:8443}
+      DERPER_IMAGE: ghcr.io/as214933/derpers-contorller-derper:${IMAGE_VERSION:-edge}
+      CADDY_IMAGE: caddy:2.11.7-alpine@sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f
+      ACME_EMAIL: ${ACME_EMAIL:-}
+      ACME_DIRECTORY: ${ACME_DIRECTORY:-https://acme-v02.api.letsencrypt.org/directory}
+    ports:
+      - ${CONTROLLER_BIND:-127.0.0.1}:8443:8443
+      - 127.0.0.1:8080:8080
+    volumes:
+      - ./secrets:/certs:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [private]
+    healthcheck:
+      test: [CMD, curl, -fsS, http://127.0.0.1:8080/readyz]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+networks:
+  private:
+volumes:
+  postgres:

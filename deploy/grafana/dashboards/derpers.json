@@ -1,0 +1,16 @@
+{
+  "uid": "derpers-overview",
+  "title": "DERP 平台概览",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "15s",
+  "time": {"from": "now-1h", "to": "now"},
+  "panels": [
+    {"id": 1, "title": "准入允许 / 拒绝 / 错误", "type": "timeseries", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0}, "datasource": {"type": "prometheus", "uid": "derpers-prometheus"}, "targets": [{"expr": "rate(derpers_admissions_allowed_total[5m])", "legendFormat": "允许", "refId": "A"}, {"expr": "rate(derpers_admissions_denied_total[5m])", "legendFormat": "拒绝", "refId": "B"}, {"expr": "rate(derpers_admission_errors_total[5m])", "legendFormat": "错误", "refId": "C"}]},
+    {"id": 2, "title": "节点在线状态", "type": "timeseries", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0}, "datasource": {"type": "prometheus", "uid": "derpers-prometheus"}, "targets": [{"expr": "derpers_node_online", "legendFormat": "{{node_id}}", "refId": "A"}], "fieldConfig": {"defaults": {"min": 0, "max": 1}, "overrides": []}},
+    {"id": 3, "title": "DERP 中继发送流量", "type": "timeseries", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8}, "datasource": {"type": "prometheus", "uid": "derpers-prometheus"}, "targets": [{"expr": "rate(derpers_node_derper_derp_bytes_sent[5m])", "legendFormat": "{{node_id}}", "refId": "A"}], "fieldConfig": {"defaults": {"unit": "Bps"}, "overrides": []}},
+    {"id": 4, "title": "DERP 内存", "type": "timeseries", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8}, "datasource": {"type": "prometheus", "uid": "derpers-prometheus"}, "targets": [{"expr": "derpers_node_derper_memory_bytes", "legendFormat": "{{node_id}}", "refId": "A"}], "fieldConfig": {"defaults": {"unit": "bytes"}, "overrides": []}},
+    {"id": 5, "title": "DERP CPU 使用核数", "type": "timeseries", "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16}, "datasource": {"type": "prometheus", "uid": "derpers-prometheus"}, "targets": [{"expr": "rate(derpers_node_derper_cpu_seconds_total[5m])", "legendFormat": "{{node_id}}", "refId": "A"}]},
+    {"id": 6, "title": "授权源同步错误", "type": "timeseries", "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16}, "datasource": {"type": "prometheus", "uid": "derpers-prometheus"}, "targets": [{"expr": "increase(derpers_sync_errors_total[10m])", "legendFormat": "同步错误", "refId": "A"}]}
+  ]
+}

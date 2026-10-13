@@ -1,0 +1,13 @@
+.git
+.agents
+.codex
+web/node_modules
+web/dist
+.e2e
+artifacts
+*.tar
+*.log
+*.key
+*.pem
+deploy/.env
+deploy/secrets

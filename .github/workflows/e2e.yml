@@ -1,0 +1,53 @@
+name: Real DERP E2E
+on:
+  workflow_call:
+    inputs:
+      use_artifacts:
+        type: boolean
+        default: false
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  relay:
+    name: Native ${{ matrix.arch }} DERP ${{ matrix.port }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+        port: [443, 8443]
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        if: inputs.use_artifacts == true
+        with:
+          name: images-${{ matrix.arch }}
+      - name: Load the exact build artifacts
+        if: inputs.use_artifacts == true
+        run: docker load -i images-${{ matrix.arch }}.tar
+      - name: Build for manual E2E
+        if: inputs.use_artifacts != true
+        env:
+          IMAGE_TAG: ${{ github.sha }}-${{ matrix.arch }}
+        run: bash e2e/build-images.sh
+      - name: Exercise real Headscale, Agent, DERP and TUN clients
+        env:
+          IMAGE_TAG: ${{ github.sha }}-${{ matrix.arch }}
+          DERP_PORT: ${{ matrix.port }}
+          E2E_SKIP_BUILD: '1'
+          COMPOSE_PROJECT_NAME: derpers-e2e-${{ matrix.arch }}-${{ matrix.port }}
+        run: bash e2e/run.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: e2e-${{ matrix.arch }}-${{ matrix.port }}
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 7

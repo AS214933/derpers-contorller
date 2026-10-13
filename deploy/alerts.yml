@@ -1,0 +1,45 @@
+groups:
+  - name: derpers
+    rules:
+      - alert: DerpersControllerUnavailable
+        expr: up{job="derpers-controller"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: DERP controller is unavailable; new admission requests fail closed
+      - alert: DerpersNodeOffline
+        expr: derpers_node_online == 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: A DERP node has not reported a recent heartbeat
+      - alert: DerpersAuthorizationSyncFailing
+        expr: increase(derpers_sync_errors_total[10m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: An authorization source is failing to synchronize; check source health
+      - alert: DerpersAdmissionErrors
+        expr: increase(derpers_admission_errors_total[5m]) > 10
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: DERP admission requests are failing; check upstream connectivity
+      - alert: DerpersCertificateExpiring
+        expr: derpers_node_certificate_expires_seconds - time() < 7 * 24 * 3600
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: A DERP TLS certificate expires in less than seven days
+      - alert: DerpersCertificateProvisioningFailing
+        expr: increase(derpers_certificate_errors_total[1h]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: DNS or ACME certificate provisioning is failing; inspect the task audit

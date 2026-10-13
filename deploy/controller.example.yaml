@@ -1,0 +1,23 @@
+# Environment variables override this startup YAML. Keep real secrets outside Git.
+database_url: ''
+master_key: ''
+http_addr: ':8080'
+tls_addr: ':8443'
+tls_cert_file: /certs/server.crt
+tls_key_file: /certs/server.key
+node_ca_cert_file: /certs/node-ca.crt
+node_ca_key_file: /certs/node-ca.key
+controller_url: https://localhost:8443
+public_url: https://localhost:8443
+web_dir: /app/web
+headscale_allowed_cidrs: []
+oidc_issuer: ''
+oidc_client_id: ''
+oidc_client_secret: ''
+oidc_groups_claim: groups
+oidc_admin_groups: [derpers-admin]
+oidc_scopes: [openid, profile, email, groups]
+derper_image: ghcr.io/as214933/derpers-contorller-derper:edge
+caddy_image: caddy:2.11.7-alpine@sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f
+acme_directory: https://acme-v02.api.letsencrypt.org/directory
+acme_email: ''
