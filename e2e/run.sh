@@ -7,7 +7,10 @@ set +a
 export IMAGE_TAG="${IMAGE_TAG:-test}"
 export DERP_PORT="${DERP_PORT:-8443}"
 export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-derpers-e2e-${DERP_PORT}-${RANDOM}}"
-E2E_WORK="$(pwd)/.e2e/$COMPOSE_PROJECT_NAME"
+[[ "$COMPOSE_PROJECT_NAME" =~ ^[a-z0-9][a-z0-9_-]*$ ]]
+workspace="$(pwd -P)"
+E2E_WORK="$(realpath -m "$workspace/.e2e/$COMPOSE_PROJECT_NAME")"
+[[ "$E2E_WORK" == "$workspace/.e2e/"* ]]
 MASTER_KEY="$(openssl rand -base64 32)"
 export E2E_WORK MASTER_KEY
 export ENROLLMENT_TOKEN="" NODE_ID=""
@@ -31,7 +34,8 @@ wait_for() {
 }
 collect() {
   set +e
-  "${compose[@]}" logs --no-color --timestamps >"$evidence/services.log" 2>&1
+  "${compose[@]}" --profile '*' logs --no-color --timestamps >"$evidence/services.log" 2>&1
+  "${compose[@]}" --profile '*' ps -a --format json >"$evidence/compose-ps.json" 2>&1
   for component in "$derper" "$caddy"; do docker logs --timestamps "$component" >"$evidence/$component.log" 2>&1; done
   ctl audit list >"$evidence/audit.json" 2>/dev/null
   for name in client-a client-b; do
@@ -49,16 +53,24 @@ collect() {
 }
 cleanup() {
   local result=$?
-  record "RESULT exit=$result final_stage=$stage port=$DERP_PORT arch=$(uname -m)"
+  record "TEST_RESULT exit=$result final_stage=$stage port=$DERP_PORT arch=$(uname -m)"
   if [[ -n "$fault_pid" ]]; then sudo nsenter -t "$fault_pid" -n iptables -D OUTPUT -d "$caddy_ip" -p tcp --dport 9080 -j REJECT 2>/dev/null || true; fi
   collect
-  if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
-    { printf '### Real DERP E2E: %s / %s\n\n' "$(uname -m)" "$DERP_PORT"; printf 'Result: **%s**. Final stage: %s. Images: %s.\n' "$result" "$stage" "$IMAGE_TAG"; cat "$evidence/stages.log"; } >>"$GITHUB_STEP_SUMMARY"
-  fi
+  # Stop reconciliation before removing its managed components.
+  "${compose[@]}" --profile agent stop -t 5 agent >/dev/null 2>&1 || true
   docker rm -f "$derper" "$caddy" >/dev/null 2>&1 || true
   "${compose[@]}" --profile '*' down -v --remove-orphans >/dev/null 2>&1 || true
   # This absolute path was constructed beneath this repository's .e2e directory.
-  case "$E2E_WORK" in "$(pwd)/.e2e/"*) rm -rf -- "$E2E_WORK";; esac
+  # Agent intentionally creates root-owned 0700 certificate/state directories.
+  case "$E2E_WORK" in "$workspace/.e2e/"*)
+    if ! sudo rm -rf -- "$E2E_WORK"; then result=1; record 'ERROR scoped E2E cleanup failed'; fi
+    ;;
+  *) result=1; record 'ERROR refusing cleanup outside the resolved workspace';;
+  esac
+  record "RESULT exit=$result final_stage=$stage port=$DERP_PORT arch=$(uname -m)"
+  if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+    { printf '### Real DERP E2E: %s / %s\n\n' "$(uname -m)" "$DERP_PORT"; printf 'Result: **%s**. Final stage: %s. Images: %s.\n' "$result" "$stage" "$IMAGE_TAG"; cat "$evidence/stages.log"; } >>"$GITHUB_STEP_SUMMARY"
+  fi
   exit "$result"
 }
 trap cleanup EXIT
@@ -112,6 +124,7 @@ tls_cert_path: /certs/headscale.e2e.test.crt
 tls_key_path: /certs/headscale.e2e.test.key
 dns:
   magic_dns: false
+  override_local_dns: false
   base_domain: clients.e2e.test
   nameservers:
     global: []
@@ -125,8 +138,9 @@ log:
   format: json
 YAML
 stage=headscale
+"${compose[@]}" --profile headscale run --rm --no-deps headscale configtest
 "${compose[@]}" --profile headscale up -d headscale
-hs_ready() { "${compose[@]}" exec -T controller curl --cacert /certs/ca.crt -fsS https://headscale.e2e.test:8080/health >/dev/null 2>&1; }
+hs_ready() { "${compose[@]}" exec -T controller curl --cacert /certs/ca.crt --connect-timeout 2 --max-time 4 -fsS https://headscale.e2e.test:8080/health >"$evidence/headscale-health.txt" 2>&1; }
 wait_for 90 hs_ready
 "${compose[@]}" exec -T headscale headscale users create e2e >/dev/null
 user_id="$("${compose[@]}" exec -T headscale headscale users list --output json | jq -er '.[] | select(.name=="e2e") | .id')"
