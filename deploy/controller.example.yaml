@@ -19,8 +19,8 @@ oidc_client_secret: ''
 oidc_groups_claim: groups
 oidc_admin_groups: [derpers-admin]
 oidc_scopes: [openid, profile, email, groups]
-derper_image: ghcr.io/as214933/derpers-contorller-derper:edge
-agent_image: ghcr.io/as214933/derpers-contorller-agent:edge
+derper_image: ghcr.io/as214933/derpers-contorller-derper:v0.1.0
+agent_image: ghcr.io/as214933/derpers-contorller-agent:v0.1.0
 caddy_image: caddy:2.11.7-alpine@sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f
 acme_directory: https://acme-v02.api.letsencrypt.org/directory
 acme_email: ''

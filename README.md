@@ -21,7 +21,7 @@
 | Agent | `ghcr.io/as214933/derpers-contorller-agent` |
 | 官方源码 derper、JSON 参数入口 | `ghcr.io/as214933/derpers-contorller-derper` |
 
-项目镜像支持 `linux/amd64`、`linux/arm64`。main 成功发布不可变 `sha-<完整提交SHA>`，仅当该提交仍是当前 main 时更新 `edge`。版本标签通过独立 release 工作流提升已成功完成 main CI 的同一 manifest 摘要，不重建或覆盖 SHA 标签。稳定 `vX.Y.Z` 更新 `latest` 时比较 SemVer，旧版本和预发布版本不会让 `latest` 回退。生产固定发布摘要；`edge` 便于首次部署验证。上游镜像摘要及源码提交固定在 [deploy/images.env](deploy/images.env)。客户端与 derper 均从同一固定 Tailscale 源码构建，避免假设 Docker Hub 已经发布同名客户端镜像。
+项目镜像支持 `linux/amd64`、`linux/arm64`。部署示例默认使用明确版本 `v0.1.0`，生产可进一步固定该版本的 manifest 摘要。main 成功发布不可变 `sha-<完整提交SHA>`，仅当该提交仍是当前 main 时更新开发标签 `edge`。版本标签通过独立 release 工作流提升已成功完成 main CI 的同一 manifest 摘要，不重建或覆盖 SHA 标签。稳定 `vX.Y.Z` 更新 `latest` 时比较 SemVer，旧版本和预发布版本不会让 `latest` 回退。上游镜像摘要及源码提交固定在 [deploy/images.env](deploy/images.env)。客户端与 derper 均从同一固定 Tailscale 源码构建，避免假设 Docker Hub 已经发布同名客户端镜像。
 
 ## 控制器部署
 
