@@ -1,6 +1,6 @@
 # 多 Tailnet 共享 DERP 平台实施计划
 
-更新日期：2026-10-13。当前阶段执行本计划：开发完整平台，推送目标仓库，通过真实 E2E 后发布 GHCR。各功能是否完成以实现、测试和交付证据为准。
+更新日期：2026-10-14。当前阶段执行本计划：开发完整平台，推送目标仓库，通过真实 E2E 后发布 GHCR。各功能是否完成以实现、测试和交付证据为准。Git 提交和 PR 标题遵守 [CONTRIBUTING.md](CONTRIBUTING.md) 中的 Conventional Commits 约定。
 
 ## 一、目标、架构与复用原则
 
@@ -94,11 +94,12 @@
 
 Caddy 和 PostgreSQL 引用上游标准镜像并固定摘要。上述三套项目镜像发布 linux/amd64 和 linux/arm64；加上 source、revision、version 等 OCI 标签。GHCR 包关联目标仓库并设为 public，首次发布后验证匿名拉取；GitHub 的新包默认私有，不能只依据仓库公开就认为镜像公开。
 
-使用三个工作流职责：
+使用四个工作流职责：
 
-- ci.yml：PR、main 推送、v* 标签推送时运行 Go 检查/测试、网页类型与构建检查、镜像构建，并调用真实 E2E；仅在可信 main 或版本标签且所有检查通过后调用发布。
+- ci.yml：PR 和 main 推送时运行 Go 检查/测试、网页类型与构建检查、镜像构建，并调用真实 E2E；仅在可信 main 且所有检查通过后调用发布。
 - e2e.yml：可复用且支持 workflow_dispatch，运行下一节真实服务测试，默认不依赖生产 OAuth、DNS 或 OIDC Secrets。
 - publish.yml：可复用发布工作流，用 GITHUB_TOKEN 与 packages:write 发布 GHCR。PR 测试使用 contents:read，fork PR 无发布权限；第三方 Actions 固定完整 commit SHA。
+- release.yml：v* 标签只提升对应提交已通过 main CI 的镜像摘要，校验来源、架构及版本顺序，不重新构建。
 
 每个架构构建一次，镜像归档供对应 E2E 和发布复用；发布阶段直接推送测试通过的镜像产物，不重新构建替换它。两个端口矩阵复用相同架构产物。生成多架构清单后再次检查标签、摘要、架构和镜像来源信息。
 

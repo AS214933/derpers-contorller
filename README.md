@@ -95,6 +95,8 @@ DERP_PORT=443 IMAGE_TAG=test E2E_SKIP_BUILD=1 bash e2e/run.sh
 
 ## 监控与启动配置
 
+后台直接展示管理心跳、DERP TLS 探测及 Docker 进程状态，超过 60 秒的探测样本显示为过期。可选的 `GRAFANA_URL` 和 `PROMETHEUS_URL` 应配置为浏览器能访问的、已保护的监控地址；默认留空时隐藏外部入口，仍可使用后台内置指标图表。
+
 可选监控配置包含固定摘要的 Prometheus/Grafana、私网采集、基本告警规则和预置仪表盘：
 
 ```bash
