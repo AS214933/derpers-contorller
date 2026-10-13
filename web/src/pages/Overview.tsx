@@ -24,6 +24,7 @@ import { NoData, PageTitle, ResourceError, StatCard } from "../components";
 import { compact, timestamp } from "../utils";
 import { nodeHealth } from "../node-health";
 import { ManagementTag, RelayTag } from "../NodeHealth";
+import { nodeControls } from "../node-admin";
 
 export function Overview({
   user,
@@ -41,12 +42,12 @@ export function Overview({
   const approved = networks.data?.filter((n) => n.status === "approved").length;
   const pending =
     networks.data?.filter((n) => n.status === "pending").length || 0;
-  const published = nodes.data?.filter((n) => n.published).length;
+  const published = nodes.data?.filter((n) => nodeControls(n).inMap).length;
   const online = nodes.data?.filter(
     (n) => nodeHealth(n).management === "online",
   ).length;
   const healthy = nodes.data?.filter(
-    (n) => n.published && nodeHealth(n).relay === "healthy",
+    (n) => nodeControls(n).inMap && nodeHealth(n).relay === "healthy",
   ).length;
   const devices = networks.data?.reduce(
     (total, n) => total + n.device_count,
@@ -196,6 +197,7 @@ export function Overview({
                           <strong>{node.name}</strong>
                           <ManagementTag node={node} compact />
                           <RelayTag node={node} compact />
+                          {!node.enabled && <Tag bordered={false}>已停用</Tag>}
                         </Space>
                       }
                       description={

@@ -161,6 +161,7 @@ export function Monitoring() {
                   <div className="monitor-node" key={node.id}>
                     <div className="monitor-node-top">
                       <strong>{node.name}</strong>
+                      {!node.enabled && <Tag bordered={false}>已停用</Tag>}
                       <ManagementTag node={node} compact />
                     </div>
                     <span className="muted">

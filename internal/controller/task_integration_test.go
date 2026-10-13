@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"strings"
 	"sync"
 	"testing"
@@ -225,5 +226,49 @@ func TestIntegrationOldFailedUpgradeCannotReplaceNewDesiredImage(t *testing.T) {
 	got := currentTaskNode(t, a, n.ID)
 	if got.Revision != 3 || got.DerperImage != imageB {
 		t.Fatalf("old failure overwrote newer desired image: %+v", got)
+	}
+}
+
+func TestIntegrationDisabledNodeRejectsAgentTasks(t *testing.T) {
+	a := integrationApp(t)
+	ctx := context.Background()
+	n := taskNode(t, a)
+	disabled := n
+	disabled.Enabled = false
+	disabled.Revision++
+	if err := a.Store.Save(ctx, "node", n.ID, "", disabled.Revision, disabled, nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, kind := range []string{"restart", "logs", "upgrade"} {
+		t.Run(kind, func(t *testing.T) {
+			payload, _ := json.Marshal(map[string]any{"component": "derper", "image": "ghcr.io/example/derper@sha256:" + strings.Repeat("a", 64)})
+			task := model.Task{ID: store.ID(), NodeID: n.ID, Type: kind, Status: "pending", Payload: payload}
+			response := authenticatedRequest(t, a, model.User{ID: "task-admin", Admin: true}, "POST", "/api/v1/nodes/"+n.ID+"/tasks", task, a.Config.PublicURL)
+			if response.Code != http.StatusConflict {
+				t.Fatalf("disabled node accepted %s: HTTP %d %s", kind, response.Code, response.Body.String())
+			}
+			// A task writer that loaded the node before it was disabled must
+			// also be rejected inside the database transaction.
+			if err := a.Store.QueueNodeTask(ctx, n, task); !errors.Is(err, store.ErrConflict) {
+				t.Fatalf("stale task writer bypassed disabled state: %v", err)
+			}
+		})
+	}
+	tasks, err := a.nodeTasks(ctx, n.ID, false)
+	if err != nil || len(tasks) != 0 {
+		t.Fatalf("rejected task left queued work: tasks=%v err=%v", tasks, err)
+	}
+	got := currentTaskNode(t, a, n.ID)
+	if got.Enabled || got.Revision != disabled.Revision || got.DerperImage != n.DerperImage {
+		t.Fatalf("rejected task changed desired state: %+v", got)
+	}
+	disabled.Enabled = true
+	disabled.Revision++
+	if err := a.Store.Save(ctx, "node", n.ID, "", disabled.Revision, disabled, nil); err != nil {
+		t.Fatal(err)
+	}
+	response := authenticatedRequest(t, a, model.User{ID: "task-admin", Admin: true}, "POST", "/api/v1/nodes/"+n.ID+"/tasks", model.Task{Type: "restart", Payload: json.RawMessage(`{"component":"derper"}`)}, a.Config.PublicURL)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("re-enabled node rejected task: HTTP %d %s", response.Code, response.Body.String())
 	}
 }

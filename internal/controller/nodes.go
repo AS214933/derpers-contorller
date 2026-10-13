@@ -607,6 +607,10 @@ func (a *App) nodesAPI(w http.ResponseWriter, r *http.Request, u model.User, par
 		if r.Method != "POST" {
 			break
 		}
+		if !n.Enabled {
+			failure(w, 409, "enable node before queuing agent tasks")
+			return
+		}
 		var t model.Task
 		if body(r, &t) != nil {
 			failure(w, 400, "invalid task")
@@ -673,7 +677,10 @@ func (a *App) Deployment(n model.Node) string {
 	}
 	network := "derpers-node-" + n.ID
 	return fmt.Sprintf(`# Generate a short-lived enrollment token in the portal.
-# Replace HOST paths with absolute paths on THIS node host.
+# Set NODE_DIR to an absolute directory on THIS node host, for example:
+# NODE_DIR=/opt/derpers/%s
+# mkdir -p "$NODE_DIR/agent" "$NODE_DIR/config" ./trust
+# Save NODE_DIR and ENROLLMENT_TOKEN in .env beside this Compose file.
 # For a private controller CA, put its public certificate in TRUST_DIR and
 # set CONTROLLER_CA_FILE=/trust/controller-ca.crt before first enrollment.
 services:
@@ -687,18 +694,18 @@ services:
       NODE_ID: %q
       STATE_DIR: /var/lib/derpers-agent
       CONFIG_DIR: /node
-      HOST_STATE_DIR: "${NODE_DIR}/agent"
-      HOST_CONFIG_DIR: "${NODE_DIR}/config"
+      HOST_STATE_DIR: "${NODE_DIR:?set NODE_DIR to an absolute node directory}/agent"
+      HOST_CONFIG_DIR: "${NODE_DIR:?set NODE_DIR to an absolute node directory}/config"
       DOCKER_NETWORK: %q
       MANAGE_CONTAINERS: "true"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - "${NODE_DIR}/agent:/var/lib/derpers-agent"
-      - "${NODE_DIR}/config:/node"
+      - "${NODE_DIR:?set NODE_DIR to an absolute node directory}/agent:/var/lib/derpers-agent"
+      - "${NODE_DIR:?set NODE_DIR to an absolute node directory}/config:/node"
       - "${TRUST_DIR:-./trust}:/trust:ro"
     networks: [node]
 networks:
   node:
     name: %q
-`, image, a.Config.ControllerURL, n.ID, network, network)
+`, n.ID, image, a.Config.ControllerURL, n.ID, network, network)
 }
