@@ -22,7 +22,9 @@ docker compose --env-file deploy/.env -f deploy/compose.yaml exec -T postgres \
 
 ## 升级与回滚
 
-部署固定 GHCR manifest 摘要；通过管理员节点任务指定镜像摘要升级。先一个节点，检查配置版本、准入错误、两客户端中继通信，再升级其余节点。Agent 自动回滚失败的组件升级；控制器数据库迁移前保留备份，在需要数据库回退时用匹配版本和备份恢复，不能只更换旧镜像假设数据库向后兼容。
+部署示例默认 `IMAGE_VERSION=v0.1.0`。生产在 `deploy/.env` 设置完整的 `CONTROLLER_IMAGE`、`AGENT_IMAGE`、`DERPER_IMAGE` 引用，如 `ghcr.io/as214933/derpers-contorller-controller@sha256:<已核实的发布索引摘要>`；这些值优先于版本标签，留空时使用 `IMAGE_VERSION`。控制器同时使用覆盖后的 Agent/derper 引用生成节点配置和部署包；手工使用节点 Compose 时，将相同的 `AGENT_IMAGE` 写入 `deploy/node.env`。
+
+通过管理员节点任务指定镜像摘要升级。先一个节点，检查配置版本、准入错误、两客户端中继通信，再升级其余节点。Agent 自动回滚失败的组件升级；控制器数据库迁移前保留备份，在需要数据库回退时用匹配版本和备份恢复，不能只更换旧镜像假设数据库向后兼容。
 
 续期 DERP 证书会受控重启节点，现有连接会重连；错开地域节点，观察失败审计和证书剩余期限。来源同步失败不会延长官方设备快照 15 分钟时限。
 

@@ -15,7 +15,7 @@ services:
       retries: 30
     networks: [private]
   controller:
-    image: ghcr.io/as214933/derpers-contorller-controller:${IMAGE_VERSION:-v0.1.0}
+    image: ${CONTROLLER_IMAGE:-ghcr.io/as214933/derpers-contorller-controller:${IMAGE_VERSION:-v0.1.0}}
     restart: unless-stopped
     environment:
       DATABASE_URL: postgres://derpers:${POSTGRES_PASSWORD}@postgres:5432/derpers?sslmode=disable
@@ -31,12 +31,14 @@ services:
       OIDC_ISSUER: ${OIDC_ISSUER:-}
       OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
       OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
+      OIDC_GROUPS_CLAIM: ${OIDC_GROUPS_CLAIM:-groups}
+      OIDC_SCOPES: ${OIDC_SCOPES:-openid,profile,email,groups}
       OIDC_ADMIN_GROUPS: ${OIDC_ADMIN_GROUPS:-derpers-admin}
       PUBLIC_URL: ${PUBLIC_URL:-https://localhost:8443}
       GRAFANA_URL: ${GRAFANA_URL:-}
       PROMETHEUS_URL: ${PROMETHEUS_URL:-}
-      DERPER_IMAGE: ghcr.io/as214933/derpers-contorller-derper:${IMAGE_VERSION:-v0.1.0}
-      AGENT_IMAGE: ghcr.io/as214933/derpers-contorller-agent:${IMAGE_VERSION:-v0.1.0}
+      DERPER_IMAGE: ${DERPER_IMAGE:-ghcr.io/as214933/derpers-contorller-derper:${IMAGE_VERSION:-v0.1.0}}
+      AGENT_IMAGE: ${AGENT_IMAGE:-ghcr.io/as214933/derpers-contorller-agent:${IMAGE_VERSION:-v0.1.0}}
       CADDY_IMAGE: caddy:2.11.7-alpine@sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f
       ACME_EMAIL: ${ACME_EMAIL:-}
       ACME_DIRECTORY: ${ACME_DIRECTORY:-https://acme-v02.api.letsencrypt.org/directory}

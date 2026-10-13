@@ -36,7 +36,7 @@ docker compose --env-file deploy/.env -f deploy/compose.yaml logs -f controller
 
 引导脚本创建数据库密码、32 字节加密主密钥、节点身份 CA 和短期 localhost TLS 证书，拒绝覆盖现有秘密。默认端口只绑定 `127.0.0.1`，本地证书须显式信任；生产将 `secrets/server.crt`、`server.key` 替换为 `CONTROLLER_URL` 的有效证书，修改绑定地址或通过受控入口转发。节点 mTLS 必须到达控制器原生 TLS listener；普通反向代理终止 TLS 后不能用未经校验的身份头代替客户端证书。
 
-OIDC 回调地址为 `<PUBLIC_URL>/auth/callback`；共用入口时与 `CONTROLLER_URL` 相同。默认管理员组 `derpers-admin`；没有对应组的用户只能管理自己的网络。人工审批默认开启。自动审批模式将所有登录用户提供的 Headscale 视为受信任授权源，启用前应确认 OIDC 用户范围。
+OIDC 回调地址为 `<PUBLIC_URL>/auth/callback`；共用入口时与 `CONTROLLER_URL` 相同。`OIDC_GROUPS_CLAIM` 默认读取 `groups` 声明，`OIDC_SCOPES` 默认请求逗号分隔的 `openid,profile,email,groups`；按身份服务商支持的声明名和 scope 调整。默认管理员组 `derpers-admin`；没有对应组的用户只能管理自己的网络。人工审批默认开启。自动审批模式将所有登录用户提供的 Headscale 视为受信任授权源，启用前应确认 OIDC 用户范围。
 
 如需接入私网 Headscale，在 `HEADSCALE_ALLOWED_CIDRS` 中明确列出允许网段。不要把整个公网和内网全部加入例外。DNS API Key、OAuth Secret、证书私钥加密保存在 PostgreSQL，`MASTER_KEY` 独立备份。
 
