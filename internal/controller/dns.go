@@ -288,52 +288,45 @@ func (a *App) applyDNS(ctx context.Context, n model.Node, account model.DNSAccou
 	if e != nil {
 		return errors.New("DNS record lookup failed")
 	}
+	return reconcileDNSRecords(ctx, p, n.Hostname, desired, owned, current, func(records []dnsapi.Record) error {
+		return a.saveOwnedDNS(ctx, account.ID, n.ID, records)
+	})
+}
+
+// Reconcile every explicitly owned A/AAAA record, including duplicates imported
+// from an older deployment. Keep one record per desired type and checkpoint each
+// successful operation so a later failure can be retried without losing ownership.
+func reconcileDNSRecords(ctx context.Context, p dnsapi.Provider, hostname string, desired, owned, current []dnsapi.Record, persist func([]dnsapi.Record) error) error {
+	owned = append([]dnsapi.Record(nil), owned...)
 	owner := map[string]bool{}
+	currentByID := map[string]dnsapi.Record{}
+	for _, r := range current {
+		currentByID[r.ID] = r
+	}
 	for _, r := range owned {
 		owner[r.ID] = true
+		if v, exists := currentByID[r.ID]; exists && (v.Name != r.Name || v.Type != r.Type || v.Value != r.Value) {
+			return errors.New("owned DNS record was changed externally")
+		}
 	}
 	for _, r := range current {
 		if (r.Type == "A" || r.Type == "AAAA" || r.Type == "CNAME") && !owner[r.ID] {
 			return errors.New("DNS conflict: existing records require explicit ownership import")
 		}
 	}
-	keep := map[string]bool{}
-	for _, r := range desired {
-		keep[r.Type] = true
-	}
-	for i := len(owned) - 1; i >= 0; i-- {
-		r := owned[i]
-		if !keep[r.Type] {
-			for _, v := range current {
-				if v.ID == r.ID {
-					if v.Name != r.Name || v.Type != r.Type || v.Value != r.Value {
-						return errors.New("owned DNS record was changed externally")
-					}
-					if e = p.Delete(ctx, r); e != nil {
-						return errors.New("DNS deletion failed")
-					}
-				}
-			}
-			owned = append(owned[:i], owned[i+1:]...)
-			if e = a.saveOwnedDNS(ctx, account.ID, n.ID, owned); e != nil {
-				return e
-			}
-		}
-	}
+	keep := map[string]string{}
 	for _, want := range desired {
 		idx := -1
 		for i, old := range owned {
 			if old.Name == want.Name && old.Type == want.Type {
-				idx = i
-				for _, r := range current {
-					if r.ID == old.ID {
-						if r.Name != old.Name || r.Type != old.Type || r.Value != old.Value {
-							return errors.New("owned DNS record was changed externally")
-						}
-						want.ID = old.ID
-					}
+				if idx < 0 {
+					idx = i
 				}
-				break
+				if _, exists := currentByID[old.ID]; exists {
+					idx = i
+					want.ID = old.ID
+					break
+				}
 			}
 		}
 		updated, e := p.Put(ctx, want)
@@ -345,7 +338,25 @@ func (a *App) applyDNS(ctx context.Context, n model.Node, account model.DNSAccou
 		} else {
 			owned[idx] = updated
 		}
-		if e = a.saveOwnedDNS(ctx, account.ID, n.ID, owned); e != nil {
+		keep[want.Type] = updated.ID
+		if e = persist(owned); e != nil {
+			return e
+		}
+	}
+	// Update the retained records before removing extras, so pruning cannot
+	// remove the last working address before its replacement is written.
+	for i := len(owned) - 1; i >= 0; i-- {
+		r := owned[i]
+		if r.Name != hostname || (r.Type != "A" && r.Type != "AAAA") || keep[r.Type] == r.ID {
+			continue
+		}
+		if _, exists := currentByID[r.ID]; exists {
+			if e := p.Delete(ctx, r); e != nil {
+				return errors.New("DNS deletion failed")
+			}
+		}
+		owned = append(owned[:i], owned[i+1:]...)
+		if e := persist(owned); e != nil {
 			return e
 		}
 	}
