@@ -6,6 +6,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/subtle"
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
@@ -13,6 +14,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	dnsapi "github.com/AS214933/derpers-contorller/internal/dns"
@@ -359,14 +361,10 @@ func needsRenewal(c *x509.Certificate, now time.Time) bool {
 }
 
 func (a *App) metrics(w http.ResponseWriter, r *http.Request) {
-	// HTTP is bound to the private application network and blocked at the public Caddy ingress.
-	// Direct HTTPS access requires an administrator's OIDC session.
-	if r.TLS != nil {
-		u, e := a.currentUser(r)
-		if e != nil || !u.Admin {
-			failure(w, 403, "administrator required")
-			return
-		}
+	w.Header().Set("Cache-Control", "no-store")
+	if !a.metricsAuthorized(r) {
+		failure(w, 403, "metrics authentication required")
+		return
 	}
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 	writeMetric(w, "derpers_admissions_allowed_total", float64(a.allowed.Load()), "")
@@ -412,6 +410,21 @@ func (a *App) metrics(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 }
+
+func (a *App) metricsAuthorized(r *http.Request) bool {
+	// A terminating reverse proxy makes TLS and forwarded certificate headers
+	// unsuitable for authentication. Accept only the configured scrape credential
+	// or an actual administrator session.
+	if token := a.Config.MetricsToken; token != "" {
+		values := r.Header.Values("Authorization")
+		if len(values) == 1 && strings.HasPrefix(values[0], "Bearer ") && subtle.ConstantTimeCompare([]byte(values[0][7:]), []byte(token)) == 1 {
+			return true
+		}
+	}
+	u, err := a.currentUser(r)
+	return err == nil && u.Admin
+}
+
 func metricName(s string) bool {
 	if s == "" {
 		return false

@@ -26,6 +26,7 @@ import (
 
 	"github.com/AS214933/derpers-contorller/internal/config"
 	"github.com/AS214933/derpers-contorller/internal/model"
+	"github.com/AS214933/derpers-contorller/internal/nodeauth"
 	"github.com/AS214933/derpers-contorller/internal/store"
 )
 
@@ -48,6 +49,9 @@ type App struct {
 }
 
 func New(c config.Config, s *store.Store) (*App, error) {
+	if c.NodeAuthMode != "" && c.NodeAuthMode != "proof" && c.NodeAuthMode != "hybrid" {
+		return nil, errors.New("node authentication mode must be proof or hybrid")
+	}
 	a := &App{Config: c, Store: s, snapshots: map[string]snapshot{}}
 	if c.NodeCACertFile != "" {
 		b, e := os.ReadFile(c.NodeCACertFile)
@@ -185,11 +189,18 @@ func (a *App) SignClient(ctx context.Context, nodeID, csrPEM string) (model.Enro
 	}
 	u, _ := url.Parse("spiffe://derpers/node/" + nodeID)
 	now := time.Now()
-	until := now.Add(7 * 24 * time.Hour)
+	lifetime := a.Config.NodeIdentityTTL
+	if lifetime == 0 {
+		lifetime = 7 * 24 * time.Hour
+	}
+	if lifetime < 5*time.Minute || lifetime > 7*24*time.Hour {
+		return model.EnrollmentResponse{}, errors.New("invalid node identity lifetime")
+	}
+	until := now.Add(lifetime)
 	if until.After(a.CA.NotAfter) {
 		until = a.CA.NotAfter
 	}
-	if until.Before(now.Add(time.Hour)) {
+	if until.Before(now.Add(min(lifetime/2, time.Hour))) {
 		return model.EnrollmentResponse{}, errors.New("node CA needs renewal")
 	}
 	tmpl := &x509.Certificate{SerialNumber: n, NotBefore: now.Add(-time.Minute), NotAfter: until, KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}, URIs: []*url.URL{u}}
@@ -205,25 +216,64 @@ func (a *App) SignClient(ctx context.Context, nodeID, csrPEM string) (model.Enro
 }
 func (a *App) NodeIdentity(r *http.Request) (model.Node, error) {
 	var n model.Node
-	if r.TLS == nil || len(r.TLS.VerifiedChains) == 0 || len(r.TLS.PeerCertificates) == 0 {
-		return n, errors.New("verified node certificate required")
-	}
-	c := r.TLS.PeerCertificates[0]
-	var id string
-	for _, u := range c.URIs {
-		if u.Scheme == "spiffe" && u.Host == "derpers" && strings.HasPrefix(u.Path, "/node/") {
-			id = strings.TrimPrefix(u.Path, "/node/")
+	present := false
+	for name := range r.Header {
+		if strings.EqualFold(name, "Authorization") {
+			present = true
+			break
 		}
 	}
-	if id == "" {
-		return n, errors.New("invalid node identity")
+	if present {
+		if a.CA == nil {
+			return n, nodeauth.ErrInvalidProof
+		}
+		limit := int64(nodeauth.MaxBodySize)
+		if r.URL.Path == "/admission/v1/verify" {
+			limit = 4096
+		}
+		var raw []byte
+		if r.Body != nil {
+			var err error
+			raw, err = io.ReadAll(io.LimitReader(r.Body, limit+1))
+			if err != nil || int64(len(raw)) > limit {
+				return n, nodeauth.ErrInvalidProof
+			}
+			_ = r.Body.Close()
+			r.Body = io.NopCloser(bytes.NewReader(raw))
+		}
+		roots := x509.NewCertPool()
+		roots.AddCert(a.CA)
+		proof, err := nodeauth.VerifyRequest(r, raw, roots, a.Config.ControllerURL, time.Now())
+		if err != nil {
+			return n, err
+		}
+		n, err = a.activeNode(r.Context(), proof.Certificate)
+		if err != nil {
+			return n, err
+		}
+		if err = a.Store.ConsumeNodeProof(r.Context(), proof.Certificate.SerialNumber.String(), n.ID, proof.ID, proof.ExpiresAt); err != nil {
+			return model.Node{}, nodeauth.ErrInvalidProof
+		}
+		return n, nil
+	}
+	if a.Config.NodeAuthMode != "hybrid" || r.TLS == nil || len(r.TLS.VerifiedChains) == 0 || len(r.TLS.PeerCertificates) == 0 {
+		return n, nodeauth.ErrInvalidProof
+	}
+	return a.activeNode(r.Context(), r.TLS.PeerCertificates[0])
+}
+
+func (a *App) activeNode(ctx context.Context, c *x509.Certificate) (model.Node, error) {
+	var n model.Node
+	id, err := nodeauth.NodeID(c)
+	if err != nil || time.Now().Before(c.NotBefore) || !time.Now().Before(c.NotAfter) {
+		return n, nodeauth.ErrInvalidProof
 	}
 	var actual string
-	e := a.Store.Pool.QueryRow(r.Context(), "SELECT node_id FROM node_serials WHERE serial=$1 AND expires>now()", c.SerialNumber.String()).Scan(&actual)
-	if e != nil || actual != id {
+	err = a.Store.Pool.QueryRow(ctx, "SELECT node_id FROM node_serials WHERE serial=$1 AND expires>now()", c.SerialNumber.String()).Scan(&actual)
+	if err != nil || actual != id {
 		return n, errors.New("node certificate is revoked")
 	}
-	rec, e := a.Store.Get(r.Context(), "node", id)
+	rec, e := a.Store.Get(ctx, "node", id)
 	if e != nil {
 		return n, e
 	}

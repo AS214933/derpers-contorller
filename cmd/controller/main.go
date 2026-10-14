@@ -260,10 +260,41 @@ func networkCommand(ctx context.Context, app *controller.App, args []string, out
 
 func nodeCommand(ctx context.Context, app *controller.App, args []string, out, errOut io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: controller node add|list|token|publish")
+		return errors.New("usage: controller node add|list|token|publish|task|tasks")
 	}
 	flags := newFlags("node "+args[0], errOut)
 	switch args[0] {
+	case "tasks":
+		id := flags.String("id", "", "node ID")
+		if err := parseFlags(flags, args[1:]); err != nil {
+			return err
+		}
+		if err := required(*id); err != nil {
+			return err
+		}
+		value, err := app.NodeTasks(ctx, *id)
+		if err != nil {
+			return err
+		}
+		return printJSON(out, value)
+	case "task":
+		id := flags.String("id", "", "node ID")
+		kind := flags.String("type", "", "restart, logs, or upgrade")
+		component := flags.String("component", "", "caddy or derper")
+		image := flags.String("image", "", "upgrade image pinned by sha256")
+		tail := flags.Int("tail", 200, "recent log lines")
+		if err := parseFlags(flags, args[1:]); err != nil {
+			return err
+		}
+		if err := required(*id, *kind, *component); err != nil {
+			return err
+		}
+		payload, _ := json.Marshal(map[string]any{"component": *component, "image": *image, "tail": *tail})
+		value, err := app.QueueAgentTask(ctx, *id, model.Task{Type: *kind, Payload: payload}, "operator")
+		if err != nil {
+			return err
+		}
+		return printJSON(out, value)
 	case "add":
 		name := flags.String("name", "", "node name")
 		hostname := flags.String("hostname", "", "DERP TLS hostname")
@@ -359,34 +390,46 @@ func nodeCommand(ctx context.Context, app *controller.App, args []string, out, e
 		}
 		return printJSON(out, values)
 	default:
-		return errors.New("usage: controller node add|list|token|publish")
+		return errors.New("usage: controller node add|list|token|publish|task|tasks")
 	}
 }
 
 func serve(ctx context.Context, app *controller.App) error {
-	if app.Config.TLSAddr == "" {
-		return errors.New("TLS_ADDR is required for authenticated node and admission APIs")
+	if app.Config.TLSAddr == "" && app.Config.HTTPAddr == "" {
+		return errors.New("HTTP_ADDR or TLS_ADDR is required")
+	}
+	if app.Config.NodeAuthMode == "hybrid" && app.Config.TLSAddr == "" {
+		return errors.New("hybrid migration requires a native TLS listener for legacy agents")
+	}
+	if app.CA == nil || app.Signer == nil {
+		return errors.New("node identity CA is required")
 	}
 	if err := app.InitAuth(ctx); err != nil {
 		return fmt.Errorf("initialize OIDC: %w", err)
 	}
-	tlsConfig, err := app.TLSConfig()
-	if err != nil {
-		return fmt.Errorf("initialize controller TLS: %w", err)
-	}
-	tlsListener, err := net.Listen("tcp", app.Config.TLSAddr)
-	if err != nil {
-		return err
-	}
-	defer tlsListener.Close()
 	handler := app.Handler()
 	newServer := func(addr string) *http.Server {
 		return &http.Server{Addr: addr, Handler: handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 1 << 20}
 	}
-	tlsServer := newServer(app.Config.TLSAddr)
-	tlsServer.TLSConfig = tlsConfig
-	servers := []*http.Server{tlsServer}
-	listeners := []net.Listener{tlsListener}
+	var servers []*http.Server
+	var listeners []net.Listener
+	var secure []bool
+	if app.Config.TLSAddr != "" {
+		tlsConfig, err := app.TLSConfig()
+		if err != nil {
+			return fmt.Errorf("initialize controller TLS: %w", err)
+		}
+		listener, err := net.Listen("tcp", app.Config.TLSAddr)
+		if err != nil {
+			return err
+		}
+		defer listener.Close()
+		server := newServer(app.Config.TLSAddr)
+		server.TLSConfig = tlsConfig
+		servers = append(servers, server)
+		listeners = append(listeners, listener)
+		secure = append(secure, true)
+	}
 	if app.Config.HTTPAddr != "" {
 		listener, err := net.Listen("tcp", app.Config.HTTPAddr)
 		if err != nil {
@@ -395,6 +438,7 @@ func serve(ctx context.Context, app *controller.App) error {
 		defer listener.Close()
 		servers = append(servers, newServer(app.Config.HTTPAddr))
 		listeners = append(listeners, listener)
+		secure = append(secure, false)
 	}
 	backgroundCtx, stop := context.WithCancel(ctx)
 	defer stop()
@@ -402,7 +446,7 @@ func serve(ctx context.Context, app *controller.App) error {
 	serverErrors := make(chan error, len(servers))
 	for i, server := range servers {
 		listener := listeners[i]
-		isTLS := i == 0
+		isTLS := secure[i]
 		go func() {
 			var err error
 			if isTLS {

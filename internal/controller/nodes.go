@@ -171,10 +171,8 @@ func (a *App) NodeConfig(ctx context.Context, id string) (model.NodeConfig, erro
 	return model.NodeConfig{NodeID: n.ID, Revision: n.Revision, Hostname: n.Hostname, HTTPSPort: n.HTTPSPort, STUNPort: n.STUNPort, STUNEnabled: n.STUNEnabled, HTTPEnabled: n.HTTPEnabled, ControllerURL: strings.TrimRight(a.Config.ControllerURL, "/"), CAPEM: sec["ca_pem"], CertificatePEM: sec["certificate_pem"], CertificateKeyPEM: sec["certificate_key_pem"], DerperImage: n.DerperImage, CaddyImage: n.CaddyImage, DerperKey: sec["derper_key"]}, nil
 }
 func (a *App) enroll(w http.ResponseWriter, r *http.Request) {
-	if r.TLS == nil {
-		failure(w, 400, "HTTPS enrollment required")
-		return
-	}
+	// The public HTTPS edge may forward HTTP over the trusted origin network.
+	// Enrollment authenticates its one-use token and CSR, not proxy headers.
 	var v model.EnrollmentRequest
 	if body(r, &v) != nil || v.Token == "" || len(v.CSR) > 16384 {
 		failure(w, 400, "token and CSR required")
@@ -216,7 +214,7 @@ func (a *App) enroll(w http.ResponseWriter, r *http.Request) {
 func (a *App) nodeAPI(w http.ResponseWriter, r *http.Request) {
 	n, e := a.NodeIdentity(r)
 	if e != nil {
-		failure(w, 403, "verified active node certificate required")
+		failure(w, 403, "authenticated active node identity required")
 		return
 	}
 	ctx := r.Context()
@@ -616,50 +614,71 @@ func (a *App) nodesAPI(w http.ResponseWriter, r *http.Request, u model.User, par
 			failure(w, 400, "invalid task")
 			return
 		}
-		var p map[string]any
-		if json.Unmarshal(t.Payload, &p) != nil {
-			failure(w, 400, "payload object required")
-			return
-		}
-		component, _ := p["component"].(string)
-		if component != "derper" && component != "caddy" {
-			failure(w, 400, "component must be derper or caddy")
-			return
-		}
-		if t.Type != "restart" && t.Type != "upgrade" && t.Type != "logs" {
-			failure(w, 400, "unsupported task type")
-			return
-		}
-		if t.Type == "upgrade" {
-			image, _ := p["image"].(string)
-			if !digestImage.MatchString(image) {
-				failure(w, 400, "upgrade image must be pinned by sha256 digest")
-				return
-			}
-			if component == "derper" {
-				p["previous_image"] = n.DerperImage
-				n.DerperImage = image
-			} else {
-				p["previous_image"] = n.CaddyImage
-				n.CaddyImage = image
-			}
-			n.Revision++
-			p["target_revision"] = n.Revision
-		}
-		t.ID = store.ID()
-		t.NodeID = n.ID
-		t.Status = "pending"
-		t.CreatedAt = time.Now().UTC()
-		t.Payload, _ = json.Marshal(p)
-		if e = a.Store.QueueNodeTask(ctx, n, t); e != nil {
+		t, e = a.QueueAgentTask(ctx, n.ID, t, u.ID)
+		if e != nil {
 			apiError(w, e)
 			return
 		}
-		a.event(ctx, "node_task_queued", u.ID, n.ID, "", t.Type)
 		jsonResponse(w, 201, t)
 		return
 	}
 	failure(w, 405, "unsupported node operation")
+}
+
+func (a *App) NodeTasks(ctx context.Context, id string) ([]model.Task, error) {
+	if _, err := a.Store.Get(ctx, "node", id); err != nil {
+		return nil, err
+	}
+	return a.nodeTasks(ctx, id, false)
+}
+
+// QueueAgentTask is shared by the administrator API and local management CLI.
+func (a *App) QueueAgentTask(ctx context.Context, id string, t model.Task, actor string) (model.Task, error) {
+	rec, err := a.Store.Get(ctx, "node", id)
+	if err != nil {
+		return t, err
+	}
+	n, err := store.Decode[model.Node](rec)
+	if err != nil {
+		return t, err
+	}
+	if !n.Enabled {
+		return t, store.ErrConflict
+	}
+	var p map[string]any
+	if json.Unmarshal(t.Payload, &p) != nil {
+		return t, errors.New("payload object required")
+	}
+	component, _ := p["component"].(string)
+	if component != "derper" && component != "caddy" {
+		return t, errors.New("component must be derper or caddy")
+	}
+	if t.Type != "restart" && t.Type != "upgrade" && t.Type != "logs" {
+		return t, errors.New("unsupported task type")
+	}
+	if t.Type == "upgrade" {
+		image, _ := p["image"].(string)
+		if !digestImage.MatchString(image) {
+			return t, errors.New("upgrade image must be pinned by sha256 digest")
+		}
+		if component == "derper" {
+			p["previous_image"] = n.DerperImage
+			n.DerperImage = image
+		} else {
+			p["previous_image"] = n.CaddyImage
+			n.CaddyImage = image
+		}
+		n.Revision++
+		p["target_revision"] = n.Revision
+	}
+	t.ID, t.NodeID, t.Status, t.CreatedAt = store.ID(), n.ID, "pending", time.Now().UTC()
+	t.Message, t.Logs = "", ""
+	t.Payload, _ = json.Marshal(p)
+	if err = a.Store.QueueNodeTask(ctx, n, t); err != nil {
+		return t, err
+	}
+	a.event(ctx, "node_task_queued", actor, n.ID, "", t.Type)
+	return t, nil
 }
 func publicHealthMetrics(metrics map[string]float64) map[string]float64 {
 	out := map[string]float64{}
