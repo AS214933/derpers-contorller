@@ -84,7 +84,7 @@ func integrationApp(t *testing.T) *App {
 	if err = s.Migrate(ctx); err != nil {
 		t.Fatal(err)
 	}
-	a, err := New(config.Config{PublicURL: "https://controller.example.test", ControllerURL: "https://controller.example.test", AllowedCIDRs: []string{"127.0.0.1/32", "::1/128"}, DerperImage: "ghcr.io/as214933/derpers-contorller-derper:edge", CaddyImage: "caddy:2.11.7"}, s)
+	a, err := New(config.Config{NodeAuthMode: "hybrid", PublicURL: "https://controller.example.test", ControllerURL: "https://controller.example.test", AllowedCIDRs: []string{"127.0.0.1/32", "::1/128"}, DerperImage: "ghcr.io/as214933/derpers-contorller-derper:edge", CaddyImage: "caddy:2.11.7"}, s)
 	if err != nil {
 		t.Fatal(err)
 	}

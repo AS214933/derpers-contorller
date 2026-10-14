@@ -5,40 +5,44 @@ import (
 	"errors"
 	"os"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
 
 type Config struct {
-	DatabaseURL      string   `yaml:"database_url"`
-	MasterKey        string   `yaml:"master_key"`
-	HTTPAddr         string   `yaml:"http_addr"`
-	TLSAddr          string   `yaml:"tls_addr"`
-	TLSCertFile      string   `yaml:"tls_cert_file"`
-	TLSKeyFile       string   `yaml:"tls_key_file"`
-	NodeCACertFile   string   `yaml:"node_ca_cert_file"`
-	NodeCAKeyFile    string   `yaml:"node_ca_key_file"`
-	ControllerURL    string   `yaml:"controller_url"`
-	PublicURL        string   `yaml:"public_url"`
-	WebDir           string   `yaml:"web_dir"`
-	AllowedCIDRs     []string `yaml:"headscale_allowed_cidrs"`
-	OIDCIssuer       string   `yaml:"oidc_issuer"`
-	OIDCClientID     string   `yaml:"oidc_client_id"`
-	OIDCClientSecret string   `yaml:"oidc_client_secret"`
-	OIDCAdminGroups  []string `yaml:"oidc_admin_groups"`
-	OIDCGroupsClaim  string   `yaml:"oidc_groups_claim"`
-	OIDCScopes       []string `yaml:"oidc_scopes"`
-	GrafanaURL       string   `yaml:"grafana_url"`
-	PrometheusURL    string   `yaml:"prometheus_url"`
-	DerperImage      string   `yaml:"derper_image"`
-	AgentImage       string   `yaml:"agent_image"`
-	CaddyImage       string   `yaml:"caddy_image"`
-	ACMEEmail        string   `yaml:"acme_email"`
-	ACMEDirectory    string   `yaml:"acme_directory"`
+	DatabaseURL      string        `yaml:"database_url"`
+	MasterKey        string        `yaml:"master_key"`
+	HTTPAddr         string        `yaml:"http_addr"`
+	TLSAddr          string        `yaml:"tls_addr"`
+	TLSCertFile      string        `yaml:"tls_cert_file"`
+	TLSKeyFile       string        `yaml:"tls_key_file"`
+	NodeCACertFile   string        `yaml:"node_ca_cert_file"`
+	NodeCAKeyFile    string        `yaml:"node_ca_key_file"`
+	NodeAuthMode     string        `yaml:"node_auth_mode"`
+	NodeIdentityTTL  time.Duration `yaml:"node_identity_ttl"`
+	MetricsToken     string        `yaml:"metrics_token"`
+	ControllerURL    string        `yaml:"controller_url"`
+	PublicURL        string        `yaml:"public_url"`
+	WebDir           string        `yaml:"web_dir"`
+	AllowedCIDRs     []string      `yaml:"headscale_allowed_cidrs"`
+	OIDCIssuer       string        `yaml:"oidc_issuer"`
+	OIDCClientID     string        `yaml:"oidc_client_id"`
+	OIDCClientSecret string        `yaml:"oidc_client_secret"`
+	OIDCAdminGroups  []string      `yaml:"oidc_admin_groups"`
+	OIDCGroupsClaim  string        `yaml:"oidc_groups_claim"`
+	OIDCScopes       []string      `yaml:"oidc_scopes"`
+	GrafanaURL       string        `yaml:"grafana_url"`
+	PrometheusURL    string        `yaml:"prometheus_url"`
+	DerperImage      string        `yaml:"derper_image"`
+	AgentImage       string        `yaml:"agent_image"`
+	CaddyImage       string        `yaml:"caddy_image"`
+	ACMEEmail        string        `yaml:"acme_email"`
+	ACMEDirectory    string        `yaml:"acme_directory"`
 }
 
 func Load(path string) (Config, error) {
-	c := Config{HTTPAddr: ":8080", TLSAddr: ":8443", WebDir: "web/dist", OIDCGroupsClaim: "groups", OIDCScopes: []string{"openid", "profile", "email", "groups"}, AgentImage: "ghcr.io/as214933/derpers-contorller-agent:edge", DerperImage: "ghcr.io/as214933/derpers-contorller-derper:edge", CaddyImage: "caddy:2.11.7", ACMEDirectory: "https://acme-v02.api.letsencrypt.org/directory"}
+	c := Config{HTTPAddr: ":8080", NodeAuthMode: "proof", NodeIdentityTTL: 7 * 24 * time.Hour, WebDir: "web/dist", OIDCGroupsClaim: "groups", OIDCScopes: []string{"openid", "profile", "email", "groups"}, AgentImage: "ghcr.io/as214933/derpers-contorller-agent:edge", DerperImage: "ghcr.io/as214933/derpers-contorller-derper:edge", CaddyImage: "caddy:2.11.7", ACMEDirectory: "https://acme-v02.api.letsencrypt.org/directory"}
 	if path != "" {
 		b, e := os.ReadFile(path)
 		if e != nil {
@@ -56,6 +60,28 @@ func Load(path string) (Config, error) {
 	}
 	if s, ok := os.LookupEnv("AGENT_IMAGE"); ok {
 		c.AgentImage = s
+	}
+	if s, ok := os.LookupEnv("NODE_AUTH_MODE"); ok {
+		c.NodeAuthMode = s
+	}
+	if s, ok := os.LookupEnv("METRICS_TOKEN"); ok {
+		c.MetricsToken = s
+	}
+	if s, ok := os.LookupEnv("NODE_IDENTITY_TTL"); ok {
+		var err error
+		c.NodeIdentityTTL, err = time.ParseDuration(s)
+		if err != nil {
+			return c, errors.New("NODE_IDENTITY_TTL must be a duration")
+		}
+	}
+	if c.NodeAuthMode == "" {
+		c.NodeAuthMode = "proof"
+	}
+	if c.NodeAuthMode != "proof" && c.NodeAuthMode != "hybrid" {
+		return c, errors.New("NODE_AUTH_MODE must be proof or hybrid")
+	}
+	if c.NodeIdentityTTL < 5*time.Minute || c.NodeIdentityTTL > 7*24*time.Hour {
+		return c, errors.New("NODE_IDENTITY_TTL must be between 5m and 168h")
 	}
 	if s, ok := os.LookupEnv("HEADSCALE_ALLOWED_CIDRS"); ok {
 		c.AllowedCIDRs = split(s)

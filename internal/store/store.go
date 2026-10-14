@@ -115,6 +115,8 @@ func (s *Store) Migrate(ctx context.Context) error {
  CREATE TABLE IF NOT EXISTS audit(id text PRIMARY KEY,time timestamptz NOT NULL,data jsonb NOT NULL);
  CREATE INDEX IF NOT EXISTS audit_time ON audit(time DESC);
  CREATE TABLE IF NOT EXISTS node_serials(serial text PRIMARY KEY,node_id text NOT NULL,expires timestamptz NOT NULL);
+ CREATE TABLE IF NOT EXISTS node_proofs(serial text NOT NULL,jti text NOT NULL,expires timestamptz NOT NULL,PRIMARY KEY(serial,jti));
+ CREATE INDEX IF NOT EXISTS node_proofs_expiry ON node_proofs(expires);
  CREATE TABLE IF NOT EXISTS dns_records(account_id text NOT NULL,node_id text NOT NULL,data jsonb NOT NULL,PRIMARY KEY(account_id,node_id));`)
 	return e
 }
@@ -423,6 +425,22 @@ func (s *Store) ConsumeEnrollment(ctx context.Context, t string) (string, error)
 	return id, nil
 }
 func (s *Store) Cleanup(ctx context.Context) error {
-	_, e := s.Pool.Exec(ctx, "DELETE FROM sessions WHERE expires<now(); DELETE FROM enrollments WHERE expires<now(); DELETE FROM node_serials WHERE expires<now(); DELETE FROM audit WHERE time<now()-interval '30 days'")
+	_, e := s.Pool.Exec(ctx, "DELETE FROM sessions WHERE expires<now(); DELETE FROM enrollments WHERE expires<now(); DELETE FROM node_serials WHERE expires<now(); DELETE FROM node_proofs WHERE expires<now(); DELETE FROM audit WHERE time<now()-interval '30 days'")
 	return e
+}
+
+// ConsumeNodeProof both rechecks active identity and consumes a nonce in one
+// statement. The primary key arbitrates concurrent replay across connections.
+func (s *Store) ConsumeNodeProof(ctx context.Context, serial, nodeID, jti string, expires time.Time) error {
+	q, err := s.Pool.Exec(ctx, `INSERT INTO node_proofs(serial,jti,expires)
+ SELECT $1,$3,GREATEST($4::timestamptz,now()+interval '90 seconds') FROM node_serials s JOIN resources n ON n.kind='node' AND n.id=s.node_id
+ WHERE s.serial=$1 AND s.node_id=$2 AND s.expires>now() AND n.data->>'enabled'='true'
+ ON CONFLICT DO NOTHING`, serial, nodeID, jti, expires)
+	if err != nil {
+		return err
+	}
+	if q.RowsAffected() != 1 {
+		return ErrConflict
+	}
+	return nil
 }

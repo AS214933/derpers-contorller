@@ -346,13 +346,14 @@ func (a *App) decide(ctx context.Context, req tailcfg.DERPAdmitClientRequest) (b
 	return false, "", nil
 }
 func (a *App) admission(w http.ResponseWriter, r *http.Request) {
-	node, e := a.NodeIdentity(r)
-	if e != nil {
-		failure(w, 403, "verified active node identity required")
-		return
-	}
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
+	r = r.WithContext(ctx)
+	node, e := a.NodeIdentity(r)
+	if e != nil {
+		failure(w, 403, "authenticated active node identity required")
+		return
+	}
 	var req tailcfg.DERPAdmitClientRequest
 	r.Body = http.MaxBytesReader(w, r.Body, 4096)
 	if e = body(r, &req); e != nil || req.NodePublic.IsZero() {
