@@ -97,9 +97,8 @@ func derperArguments(c model.NodeConfig) []string {
 	return []string{"-certmode", "manual", "-certdir", "/certs", "-hostname", c.Hostname, "-a", ":" + strconv.Itoa(c.HTTPSPort), "-http-port", "-1", "-stun=" + strconv.FormatBool(c.STUNEnabled), "-stun-port", strconv.Itoa(c.STUNPort), "-c", "/state/derper.key", "-verify-client-url", "http://caddy:9080/verify", "-verify-client-url-fail-open=false", "-verify-clients=false"}
 }
 
-func caddyConfiguration(c model.NodeConfig, controllerURL string) string {
-	controllerURL = strings.TrimRight(controllerURL, "/")
-	config := fmt.Sprintf(`{
+func caddyConfiguration(c model.NodeConfig) string {
+	config := `{
 	admin off
 	auto_https off
 	persist_config off
@@ -114,11 +113,8 @@ func caddyConfiguration(c model.NodeConfig, controllerURL string) string {
 		path /verify
 	}
 	handle @admission {
-		rewrite * /admission/v1/verify
-		reverse_proxy %s {
+		reverse_proxy http://agent:9081 {
 			transport http {
-				tls_client_auth /agent-state/client.crt /agent-state/client.key
-				tls_trust_pool file /agent-state/server-ca.crt
 				dial_timeout 2s
 				response_header_timeout 4s
 			}
@@ -128,7 +124,7 @@ func caddyConfiguration(c model.NodeConfig, controllerURL string) string {
 		respond "Not Found" 404
 	}
 }
-`, strconv.Quote(controllerURL))
+`
 	if c.HTTPEnabled {
 		config += fmt.Sprintf(`
 :80 {
@@ -168,7 +164,7 @@ func (a *Agent) configurationFiles(c model.NodeConfig) (map[string][]byte, error
 	}
 	files := map[string][]byte{
 		filepath.Join(a.cfg.ConfigDir, "derper-args.json"):         args,
-		filepath.Join(a.cfg.ConfigDir, "Caddyfile"):                []byte(caddyConfiguration(c, a.cfg.ControllerURL)),
+		filepath.Join(a.cfg.ConfigDir, "Caddyfile"):                []byte(caddyConfiguration(c)),
 		filepath.Join(a.cfg.ConfigDir, "certs", c.Hostname+".crt"): []byte(c.CertificatePEM),
 		filepath.Join(a.cfg.ConfigDir, "certs", c.Hostname+".key"): []byte(c.CertificateKeyPEM),
 		filepath.Join(a.cfg.ConfigDir, "certs", "ca.crt"):          rootsPEM,
@@ -465,14 +461,15 @@ func (a *Agent) componentName(component string) string {
 func (a *Agent) containerSpec(c model.NodeConfig, component string) containerSpec {
 	var configuration any
 	if component == "caddy" {
-		trust, err := os.ReadFile(filepath.Join(a.cfg.StateDir, "server-ca.crt"))
-		if err != nil {
-			trust = []byte(c.CAPEM)
-			if data, err := os.ReadFile(a.cfg.ControllerCAFile); err == nil {
-				trust = append(trust, data...)
+		var trust []byte
+		if c.HTTPEnabled {
+			var err error
+			trust, err = os.ReadFile(filepath.Join(a.cfg.ConfigDir, "certs", "ca.crt"))
+			if err != nil {
+				trust = []byte(c.CAPEM)
 			}
 		}
-		configuration = struct{ Config, Trust string }{caddyConfiguration(c, a.cfg.ControllerURL), string(trust)}
+		configuration = struct{ Config, Trust string }{caddyConfiguration(c), string(trust)}
 	} else {
 		configuration = struct {
 			Args                               []string
@@ -494,14 +491,10 @@ func (a *Agent) containerSpec(c model.NodeConfig, component string) containerSpe
 	aliases := []string{"derper", c.Hostname}
 	ports := map[string][]map[string]string{}
 	if component == "caddy" {
-		if len(a.identity.Certificate.Certificate) > 0 {
-			identityHash := sha256.Sum256(a.identity.Certificate.Certificate[0])
-			spec.Labels["derpers.identity_hash"] = hex.EncodeToString(identityHash[:])
-		}
 		spec.Image = c.CaddyImage
 		spec.Env = nil
 		spec.Cmd = []string{"caddy", "run", "--config", "/node/Caddyfile", "--adapter", "caddyfile"}
-		spec.HostConfig["Binds"] = []string{a.cfg.HostConfigDir + ":/node:ro", a.cfg.HostStateDir + ":/agent-state:ro"}
+		spec.HostConfig["Binds"] = []string{a.cfg.HostConfigDir + ":/node:ro"}
 		aliases = []string{"caddy"}
 		spec.ExposedPorts["9080/tcp"] = struct{}{}
 		if c.HTTPEnabled {

@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/AS214933/derpers-contorller/internal/model"
+	"github.com/AS214933/derpers-contorller/internal/nodeauth"
 )
 
 type testCA struct {
@@ -57,11 +58,18 @@ func newTestCA(t *testing.T, name string) testCA {
 
 func (ca testCA) sign(t *testing.T, public any, server bool) []byte {
 	t.Helper()
-	template := &x509.Certificate{SerialNumber: big.NewInt(time.Now().UnixNano()), Subject: pkix.Name{CommonName: "test-node"}, NotBefore: time.Now().Add(-2 * time.Hour), NotAfter: time.Now().Add(time.Hour), KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}}
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := &x509.Certificate{SerialNumber: serial, Subject: pkix.Name{CommonName: "test-node"}, NotBefore: time.Now().Add(-2 * time.Hour), NotAfter: time.Now().Add(time.Hour), KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}}
 	if server {
 		template.DNSNames = []string{"localhost", "derp.e2e.test"}
 		template.IPAddresses = []net.IP{net.ParseIP("127.0.0.1")}
 		template.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}
+	} else {
+		u, _ := url.Parse("spiffe://derpers/node/node-1")
+		template.URIs = []*url.URL{u}
 	}
 	der, err := x509.CreateCertificate(rand.Reader, template, ca.cert, public, ca.key)
 	if err != nil {
@@ -82,11 +90,37 @@ func TestEnrollmentAndRenewalPreserveSeparateServerTrust(t *testing.T) {
 	clientRoots := x509.NewCertPool()
 	clientRoots.AppendCertsFromPEM(nodeCA.pem)
 	var enrolls, renewals, authenticated int
-	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	var server *httptest.Server
+	var serials []string
+	proofs := map[string]bool{}
+	server = httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if len(r.TLS.PeerCertificates) != 0 {
+			t.Error("Agent unexpectedly sent a TLS client certificate")
+		}
+		data, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		if r.URL.Path != "/api/v1/node-enroll" {
+			proof, err := nodeauth.VerifyRequest(r, data, clientRoots, server.URL, time.Now())
+			if err != nil {
+				t.Errorf("missing or invalid signed request: %v", err)
+				w.WriteHeader(401)
+				return
+			}
+			if proof.NodeID != "node-1" || proofs[proof.ID] {
+				t.Error("wrong node or repeated request proof")
+			}
+			proofs[proof.ID] = true
+			serials = append(serials, proof.Certificate.SerialNumber.String())
+		} else if r.Header.Get("Authorization") != "" {
+			t.Error("enrollment sent pre-existing credentials")
+		}
 		switch r.URL.Path {
 		case "/api/v1/node-enroll", "/node/v1/renew":
 			var request model.EnrollmentRequest
-			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			if err := json.Unmarshal(data, &request); err != nil {
 				t.Error(err)
 				http.Error(w, "bad request", 400)
 				return
@@ -98,9 +132,6 @@ func TestEnrollmentAndRenewalPreserveSeparateServerTrust(t *testing.T) {
 				}
 			} else {
 				renewals++
-				if len(r.TLS.VerifiedChains) == 0 {
-					t.Error("renewal lacks mTLS")
-				}
 			}
 			block, _ := pem.Decode([]byte(request.CSR))
 			if block == nil {
@@ -118,17 +149,13 @@ func TestEnrollmentAndRenewalPreserveSeparateServerTrust(t *testing.T) {
 			}
 			json.NewEncoder(w).Encode(model.EnrollmentResponse{NodeID: "node-1", ClientCertificate: string(nodeCA.sign(t, csr.PublicKey, false)), CACertificate: string(nodeCA.pem)})
 		case "/node/v1/config":
-			if len(r.TLS.VerifiedChains) == 0 {
-				http.Error(w, "mTLS required", 401)
-				return
-			}
 			authenticated++
 			json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 		default:
 			http.NotFound(w, r)
 		}
 	}))
-	server.TLS = &tls.Config{Certificates: []tls.Certificate{serverPair}, ClientCAs: clientRoots, ClientAuth: tls.VerifyClientCertIfGiven, MinVersion: tls.VersionTLS12}
+	server.TLS = &tls.Config{Certificates: []tls.Certificate{serverPair}, ClientAuth: tls.RequestClientCert, ClientCAs: clientRoots, MinVersion: tls.VersionTLS12}
 	server.StartTLS()
 	defer server.Close()
 	dir := t.TempDir()
@@ -149,6 +176,9 @@ func TestEnrollmentAndRenewalPreserveSeparateServerTrust(t *testing.T) {
 	if err := a.request(context.Background(), a.client, http.MethodGet, "/node/v1/config", nil, &result); err != nil {
 		t.Fatal(err)
 	}
+	// Renewal must swap the signer without restarting Caddy or touching Docker.
+	a.cfg.ManageContainers = true
+	a.applied = &model.NodeConfig{NodeID: "node-1"}
 	if err := a.renew(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -157,6 +187,9 @@ func TestEnrollmentAndRenewalPreserveSeparateServerTrust(t *testing.T) {
 	}
 	if enrolls != 1 || renewals != 1 || authenticated != 2 {
 		t.Fatalf("unexpected API counts: enroll=%d renew=%d auth=%d", enrolls, renewals, authenticated)
+	}
+	if len(serials) != 3 || serials[0] != serials[1] || serials[1] == serials[2] {
+		t.Fatalf("renewal did not atomically replace the request signing certificate: %v", serials)
 	}
 	restarted, err := New(cfg, nil)
 	if err != nil {
@@ -167,6 +200,22 @@ func TestEnrollmentAndRenewalPreserveSeparateServerTrust(t *testing.T) {
 	}
 	if err := restarted.request(context.Background(), restarted.client, http.MethodGet, "/node/v1/config", nil, &result); err != nil {
 		t.Fatal(err)
+	}
+	// Older Agent installations stored sidecars only. Reuse that same identity,
+	// without consuming another token or issuing a replacement certificate.
+	if err := os.Remove(filepath.Join(cfg.StateDir, "identity.json")); err != nil {
+		t.Fatal(err)
+	}
+	cfg.EnrollmentToken = ""
+	legacy, err := New(cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := legacy.request(context.Background(), legacy.client, http.MethodGet, "/node/v1/config", nil, &result); err != nil {
+		t.Fatal(err)
+	}
+	if enrolls != 1 || legacy.identity.Certificate.Leaf.SerialNumber.Cmp(restarted.identity.Certificate.Leaf.SerialNumber) != 0 {
+		t.Fatal("legacy identity reuse performed another enrollment or changed certificates")
 	}
 }
 
@@ -454,6 +503,13 @@ func TestManagedCaddyUsesOfficialImageCommandAndPrivatePorts(t *testing.T) {
 	bindings := spec.HostConfig["PortBindings"].(map[string][]map[string]string)
 	if len(bindings) != 1 || bindings["80/tcp"] == nil {
 		t.Fatalf("internal Caddy port exposed: %#v", bindings)
+	}
+	if binds := spec.HostConfig["Binds"].([]string); len(binds) != 1 || binds[0] != "/opt/node:/node:ro" {
+		t.Fatalf("Caddy can still read the node signing identity: %v", binds)
+	}
+	config := caddyConfiguration(model.NodeConfig{})
+	if !strings.Contains(config, "reverse_proxy http://agent:9081") || strings.Contains(config, "tls_client_auth") || strings.Contains(config, "agent-state") {
+		t.Fatalf("Caddy did not delegate admission signing to the private Agent: %s", config)
 	}
 }
 

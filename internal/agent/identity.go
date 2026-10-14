@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/AS214933/derpers-contorller/internal/model"
+	"github.com/AS214933/derpers-contorller/internal/nodeauth"
 )
 
 type identity struct {
@@ -208,9 +209,6 @@ func (a *Agent) renew(ctx context.Context) error {
 	if err := a.authenticatedClient(); err != nil {
 		return err
 	}
-	if a.cfg.ManageContainers && a.applied != nil {
-		return a.docker.Ensure(ctx, a.caddyName(), a.identity.NodeID, a.containerSpec(*a.applied, "caddy"), a.healthCheck("caddy", *a.applied))
-	}
 	return nil
 }
 
@@ -260,11 +258,15 @@ func (a *Agent) authenticatedClient() error {
 	if err != nil {
 		return err
 	}
-	pair := a.identity.Certificate
+	signer, err := nodeauth.NewSigner(a.identity.Certificate)
+	if err != nil {
+		return err
+	}
 	if a.client != nil {
 		a.client.CloseIdleConnections()
 	}
-	a.client = &http.Client{Timeout: 20 * time.Second, CheckRedirect: rejectRedirect, Transport: &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots, Certificates: []tls.Certificate{pair}}, ForceAttemptHTTP2: true, MaxIdleConns: 10, IdleConnTimeout: 60 * time.Second}}
+	base := &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots}, ForceAttemptHTTP2: true, MaxIdleConns: 10, IdleConnTimeout: 60 * time.Second}
+	a.client = &http.Client{Timeout: 20 * time.Second, CheckRedirect: rejectRedirect, Transport: &nodeauth.Transport{Base: base, Signer: signer, Audience: strings.TrimRight(a.cfg.ControllerURL, "/")}}
 	a.nodeClient.Store(a.client)
 	return nil
 }
