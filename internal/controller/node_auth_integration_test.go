@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -37,6 +38,68 @@ type nodeProofFixture struct {
 	edge      *httptest.Server
 	client    *http.Client
 	plainHops atomic.Uint64
+}
+
+func forgedNodeProxyHeaders(leafDER []byte, nodeID string) http.Header {
+	certificate := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leafDER})
+	identity := "spiffe://derpers/node/" + nodeID
+	return http.Header{
+		"X-Forwarded-Client-Cert": {`Cert="` + url.QueryEscape(string(certificate)) + `";URI=` + identity},
+		"X-Ssl-Client-Verify":     {"SUCCESS"},
+		"X-Ssl-Client-S-Dn":       {"CN=derpers-node"},
+		"X-Ssl-Client-San":        {"URI:" + identity},
+		"X-Forwarded-Proto":       {"https"},
+	}
+}
+
+// Run without PostgreSQL: a malformed HTTP header must fail here, rather than
+// remaining hidden when database-backed negative authentication tests skip.
+func TestForgedProxyCertificateHeadersTraverseHTTPTransport(t *testing.T) {
+	now := time.Now()
+	_, _, leaf := testCertificate(t, "header.example.test", now.Add(-time.Hour), now.Add(time.Hour))
+	headers := forgedNodeProxyHeaders(leaf.Raw, "header-transport-node")
+	for _, mode := range []string{"proof", "hybrid"} {
+		t.Run(mode, func(t *testing.T) {
+			a := &App{}
+			a.Config.NodeAuthMode = mode
+			handler := a.Handler()
+			var arrivals atomic.Uint64
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				arrivals.Add(1)
+				for name, values := range headers {
+					if r.Header.Get(name) != values[0] {
+						t.Errorf("forged header %s changed in transport", name)
+					}
+				}
+				handler.ServeHTTP(w, r)
+			}))
+			defer server.Close()
+			client := server.Client()
+			client.Timeout = 3 * time.Second
+			for _, authorization := range [][]string{nil, {""}, {"DerpersProof invalid"}, {"DerpersProof invalid", "DerpersProof invalid"}} {
+				r, err := http.NewRequest(http.MethodGet, server.URL+"/node/v1/config", nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				r.Header = headers.Clone()
+				if authorization != nil {
+					r.Header["Authorization"] = authorization
+				}
+				res, err := client.Do(r)
+				if err != nil {
+					t.Fatalf("forged certificate fixture failed HTTP transport: %v", err)
+				}
+				io.Copy(io.Discard, res.Body)
+				res.Body.Close()
+				if res.StatusCode != 403 || res.Header.Get("Cache-Control") != "no-store" {
+					t.Fatalf("forged proxy identity status=%d cache=%q", res.StatusCode, res.Header.Get("Cache-Control"))
+				}
+			}
+			if arrivals.Load() != 4 {
+				t.Fatalf("only %d forged header requests reached the HTTP server", arrivals.Load())
+			}
+		})
+	}
 }
 
 func newNodeProofFixture(t *testing.T) *nodeProofFixture {
@@ -232,10 +295,9 @@ func TestIntegrationNodeProofTamperingAndForgedProxyIdentity(t *testing.T) {
 			r := f.request(t, http.MethodGet, "/node/v1/config?q=one&q=two", nil, true)
 			tc.mutate(r)
 			// None of these headers are certificate proof, even when they claim success.
-			r.Header.Set("X-Forwarded-Client-Cert", string(f.app.CAPEM))
-			r.Header.Set("X-SSL-Client-Verify", "SUCCESS")
-			r.Header.Set("X-SSL-Client-S-DN", "spiffe://derpers/node/"+f.node.ID)
-			r.Header.Set("X-Forwarded-Proto", "https")
+			for name, values := range forgedNodeProxyHeaders(f.pair.Certificate[0], f.node.ID) {
+				r.Header[name] = values
+			}
 			if status, _ := f.do(t, r); status != 403 {
 				t.Fatalf("tampered request accepted: status=%d", status)
 			}
