@@ -24,7 +24,7 @@ import (
 )
 
 func TestReconciliationFingerprintsAreIsolatedByComponent(t *testing.T) {
-	a := &Agent{cfg: Config{ControllerURL: "https://controller.example.test", StateDir: t.TempDir(), HostConfigDir: "/opt/node", HostStateDir: "/opt/identity", DockerNetwork: "node-network", PublishPorts: true}, identity: identity{Certificate: tlsCertificateForFingerprint([]byte("identity-a"))}}
+	a := &Agent{cfg: Config{ControllerURL: "https://controller.example.test", StateDir: t.TempDir(), ConfigDir: t.TempDir(), HostConfigDir: "/opt/node", HostStateDir: "/opt/identity", DockerNetwork: "node-network", PublishPorts: true}, identity: identity{Certificate: tlsCertificateForFingerprint([]byte("identity-a"))}}
 	base := model.NodeConfig{NodeID: "node-1", Revision: 1, Hostname: "derp.example.test", HTTPSPort: 443, STUNEnabled: true, STUNPort: 3478, HTTPEnabled: true, CertificatePEM: "certificate-a", CertificateKeyPEM: "key-a", CAPEM: "trust-a", DerperImage: "derper@sha256:" + strings.Repeat("a", 64), CaddyImage: "caddy@sha256:" + strings.Repeat("b", 64)}
 	hash := func(c model.NodeConfig, component string) string {
 		return a.containerSpec(c, component).Labels["derpers.spec_hash"]
@@ -59,15 +59,27 @@ func TestReconciliationFingerprintsAreIsolatedByComponent(t *testing.T) {
 	}
 	derperBefore, caddyBefore := hash(base, "derper"), hash(base, "caddy")
 	a.identity.Certificate = tlsCertificateForFingerprint([]byte("identity-b"))
-	if hash(base, "derper") != derperBefore || hash(base, "caddy") == caddyBefore {
-		t.Fatal("node identity renewal did not exclusively reload Caddy")
+	if hash(base, "derper") != derperBefore || hash(base, "caddy") != caddyBefore {
+		t.Fatal("node request-signing identity renewal restarted a relay component")
 	}
 	caddyBefore = hash(base, "caddy")
-	if err := os.WriteFile(filepath.Join(a.cfg.StateDir, "server-ca.crt"), []byte("new root bundle"), 0600); err != nil {
+	if err := os.MkdirAll(filepath.Join(a.cfg.ConfigDir, "certs"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(a.cfg.ConfigDir, "certs", "ca.crt"), []byte("new root bundle"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if hash(base, "derper") != derperBefore || hash(base, "caddy") == caddyBefore {
 		t.Fatal("server trust update changed DERP or failed to reload Caddy")
+	}
+	disabledHTTP := base
+	disabledHTTP.HTTPEnabled = false
+	caddyBefore = hash(disabledHTTP, "caddy")
+	if err := os.WriteFile(filepath.Join(a.cfg.ConfigDir, "certs", "ca.crt"), []byte("another root bundle"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if hash(disabledHTTP, "caddy") != caddyBefore {
+		t.Fatal("unused DERP HTTP probe trust restarted Caddy")
 	}
 }
 
@@ -135,7 +147,7 @@ func TestRollbackRequiresHealthyProcessesAfterRestart(t *testing.T) {
 			dir := t.TempDir()
 			journal := filepath.Join(dir, "configuration.pending.json")
 			os.WriteFile(journal, []byte("journal"), 0600)
-			a := &Agent{cfg: Config{StateDir: dir, ControllerURL: "https://controller.example.test", DerperContainer: "derper", CaddyContainer: "caddy", ManageContainers: true, HealthTimeout: 150 * time.Millisecond}, identity: identity{NodeID: "node-1"}, applied: previous, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+			a := &Agent{cfg: Config{StateDir: dir, ControllerURL: "https://controller.example.test", DerperContainer: "derper", CaddyContainer: "caddy", ManageContainers: true, HealthTimeout: 150 * time.Millisecond}, identity: signingIdentityForTest(t), applied: previous, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 			var caddyRestarted atomic.Bool
 			dockerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch {

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -100,7 +101,9 @@ func (a *Agent) saveDisk() error {
 	return atomicWrite(filepath.Join(a.cfg.StateDir, "state.json"), data, 0600)
 }
 
-func (a *Agent) Run(ctx context.Context) error {
+func (a *Agent) Run(ctx context.Context) (runErr error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	defer a.bootstrap.CloseIdleConnections()
 	for a.identity.NodeID == "" {
 		if err := a.enroll(ctx); err != nil {
@@ -127,6 +130,26 @@ func (a *Agent) Run(ctx context.Context) error {
 		if err := a.enroll(ctx); err != nil {
 			return fmt.Errorf("re-enroll expired node identity: %w", err)
 		}
+	}
+	if a.cfg.ManageContainers {
+		listener, err := net.Listen("tcp", ":9081")
+		if err != nil {
+			return fmt.Errorf("listen for private admission requests: %w", err)
+		}
+		relay, failures := a.startAdmissionRelay(listener, cancel)
+		defer func() {
+			shutdown, stop := context.WithTimeout(context.Background(), 5*time.Second)
+			defer stop()
+			if err := relay.Shutdown(shutdown); err != nil {
+				_ = relay.Close()
+				runErr = errors.Join(runErr, fmt.Errorf("stop private admission relay: %w", err))
+			}
+			select {
+			case err := <-failures:
+				runErr = errors.Join(runErr, err)
+			default:
+			}
+		}()
 	}
 	if err := a.recover(ctx); err != nil {
 		return err
