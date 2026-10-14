@@ -2,7 +2,7 @@
 # Agent creates the latter two after enrollment, using the node's desired config.
 services:
   agent:
-    image: ${AGENT_IMAGE:-ghcr.io/as214933/derpers-contorller-agent:${IMAGE_VERSION:-v0.1.0}}
+    image: ${AGENT_IMAGE:-ghcr.io/as214933/derpers-contorller-agent:${IMAGE_VERSION:-v0.2.0}}
     restart: unless-stopped
     environment:
       CONTROLLER_URL: ${CONTROLLER_URL:?set the controller HTTPS URL}
@@ -22,7 +22,9 @@ services:
       - ${HOST_CONFIG_DIR}:/node
       - ${HOST_STATE_DIR}:/var/lib/derpers-agent
       - ${TRUST_DIR:-./secrets}:/trust:ro
-    networks: [node]
+    networks:
+      node:
+        aliases: [agent]
 networks:
   node:
     name: ${DOCKER_NETWORK:-derpers-node}

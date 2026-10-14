@@ -12,7 +12,8 @@ workspace="$(pwd -P)"
 E2E_WORK="$(realpath -m "$workspace/.e2e/$COMPOSE_PROJECT_NAME")"
 [[ "$E2E_WORK" == "$workspace/.e2e/"* ]]
 MASTER_KEY="$(openssl rand -base64 32)"
-export E2E_WORK MASTER_KEY
+METRICS_TOKEN="$(openssl rand -hex 32)"
+export E2E_WORK MASTER_KEY METRICS_TOKEN
 export ENROLLMENT_TOKEN="" NODE_ID=""
 evidence="$(pwd)/artifacts/$COMPOSE_PROJECT_NAME"
 mkdir -p "$E2E_WORK"/{certs,node,agent-state,headscale} "$evidence"
@@ -32,12 +33,19 @@ wait_for() {
     sleep 2
   done
 }
+proxy_logs() {
+  local tier
+  for tier in edge origin; do
+    docker logs "$("${compose[@]}" ps -q "$tier")" 2>&1 | sed -n '/^{"tier":/p' >"$evidence/$tier-requests.jsonl"
+  done
+}
 collect() {
   set +e
   "${compose[@]}" --profile '*' logs --no-color --timestamps >"$evidence/services.log" 2>&1
   "${compose[@]}" --profile '*' ps -a --format json >"$evidence/compose-ps.json" 2>&1
   for component in "$derper" "$caddy"; do docker logs --timestamps "$component" >"$evidence/$component.log" 2>&1; done
   ctl audit list >"$evidence/audit.json" 2>/dev/null
+  proxy_logs
   for name in client-a client-b; do
     client "$name" tailscale status --json >"$evidence/$name-status.json" 2>&1
     client "$name" tailscale debug derp-map >"$evidence/$name-derp-map.json" 2>&1
@@ -91,9 +99,21 @@ for host in controller.e2e.test headscale.e2e.test derp.e2e.test; do
   openssl x509 -req -in "$E2E_WORK/certs/$host.csr" -CA "$E2E_WORK/certs/ca.crt" -CAkey "$E2E_WORK/certs/ca.key" -CAcreateserial -out "$E2E_WORK/certs/$host.crt" -days 2 -extfile "$E2E_WORK/certs/$host.ext" >/dev/null 2>&1
 done
 chmod -R a+rX "$E2E_WORK/certs"
-"${compose[@]}" up -d postgres controller
+"${compose[@]}" up -d postgres controller origin edge
 controller_ready() { "${compose[@]}" exec -T controller curl -fsS http://127.0.0.1:8080/readyz >/dev/null 2>&1; }
 wait_for 120 controller_ready
+for tier in origin edge; do "${compose[@]}" exec -T "$tier" nginx -t; done
+public_ready() { "${compose[@]}" exec -T controller curl --cacert /certs/ca.crt -fsS https://controller.e2e.test:8443/readyz >/dev/null 2>&1; }
+wait_for 30 public_ready
+# The backend has no native TLS listener; its successful node requests must use proofs.
+set +e
+"${compose[@]}" exec -T controller curl --cacert /certs/ca.crt --connect-timeout 2 --max-time 3 -fsS https://127.0.0.1:8443/readyz >"$evidence/backend-native-tls.txt" 2>&1
+native_tls_code=$?
+set -e
+[[ "$native_tls_code" == 7 ]]
+# Expand the private token inside the controller container without printing it.
+# shellcheck disable=SC2016
+"${compose[@]}" exec -T controller sh -c 'curl -fsS -H "Authorization: Bearer $METRICS_TOKEN" http://127.0.0.1:8080/metrics' >"$evidence/private-controller-metrics.txt"
 stage=node-bootstrap
 node_json="$(ctl node add --name e2e --hostname derp.e2e.test --https-port "$DERP_PORT" --region-id 900 --region-code e2e --region-name E2E --stun=false --http=false --cert-file /certs/derp.e2e.test.crt --key-file /certs/derp.e2e.test.key --ca-file /certs/ca.crt --derper-image "derpers-derper:$IMAGE_TAG" --caddy-image "$CADDY_IMAGE")"
 NODE_ID="$(jq -er .id <<<"$node_json")"
@@ -102,6 +122,17 @@ export NODE_ID ENROLLMENT_TOKEN
 "${compose[@]}" --profile agent up -d agent
 node_healthy() { docker inspect -f '{{.State.Running}}' "$derper" 2>/dev/null | grep -qx true && docker inspect -f '{{.State.Running}}' "$caddy" 2>/dev/null | grep -qx true && ctl node publish --id "$NODE_ID" >"$evidence/published-node.json" 2>/dev/null; }
 wait_for 150 node_healthy
+stage=proxy-node-auth
+for path in /node/v1/config /admission/v1/verify; do
+  status="$("${compose[@]}" exec -T controller curl --cacert /certs/ca.crt -sS -o /dev/null -w '%{http_code}' -H 'X-SSL-Client-Verify: SUCCESS' -H "X-SSL-Client-CN: $NODE_ID" -H "X-Forwarded-Client-Cert: CN=$NODE_ID" "https://controller.e2e.test:8443$path")"
+  [[ "$status" == 403 ]]
+done
+status="$("${compose[@]}" exec -T controller curl --cacert /certs/ca.crt -sS -o /dev/null -w '%{http_code}' https://controller.e2e.test:8443/metrics)"
+[[ "$status" == 403 ]]
+task_id="$(ctl node task --id "$NODE_ID" --type logs --component caddy | jq -er .id)"
+task_complete() { ctl node tasks --id "$NODE_ID" | tee "$evidence/proxy-task-results.json" | jq -e --arg id "$task_id" 'any(.[]; .id==$id and .status=="succeeded")' >/dev/null; }
+wait_for 45 task_complete
+record "PASS stage=$stage HTTP backend rejects forwarded identity headers; signed task/report succeed through proxies"
 ctl derpmap --format yaml >"$E2E_WORK/headscale/derp.yaml"
 ctl derpmap --format json >"$evidence/expected-derp-map.json"
 cat >"$E2E_WORK/headscale/config.yaml" <<'YAML'
@@ -267,5 +298,26 @@ docker inspect "$derper" "$caddy" | jq '[.[] | {name:.Name, HostConfig:{PortBind
 # Docker represents disabled port publishing as null, equivalent to no bindings.
 jq -e 'all(.[]; [(.HostConfig.PortBindings // {}) | keys[]] | all(.=="443/tcp" or .=="8443/tcp" or .=="3478/udp" or .=="80/tcp"))' "$evidence/published-port-bindings.json" >/dev/null
 record "PASS stage=$stage debug protected and no internal port published"
+stage=proxy-proof-coverage
+identity_renewed() { ctl audit list | tee "$evidence/identity-renewal-audit.json" | jq -e --arg id "$NODE_ID" 'any(.[]; .event=="node_identity_renewed" and .node_id==$id)' >/dev/null; }
+wait_for 120 identity_renewed
+proxy_logs
+for tier in edge origin; do
+  if [[ "$tier" == edge ]]; then scheme=https; else scheme=http; fi
+  jq -s -e --arg scheme "$scheme" '
+    . as $requests |
+    any($requests[]; .path=="/api/v1/node-enroll" and .method=="POST" and .status==200 and .scheme==$scheme and (.cache_control|contains("no-store"))) and
+    all([
+      {path:"/node/v1/config",method:"GET",status:200},
+      {path:"/node/v1/tasks",method:"GET",status:200},
+      {path:"/node/v1/report",method:"POST",status:204},
+      {path:"/node/v1/renew",method:"POST",status:200},
+      {path:"/admission/v1/verify",method:"POST",status:200}
+    ][]; . as $expected | any($requests[];
+      .path==$expected.path and .method==$expected.method and .status==$expected.status and
+      .proof_present==1 and .scheme==$scheme and (.cache_control|contains("no-store"))))
+  ' "$evidence/$tier-requests.jsonl" >/dev/null
+done
+record "PASS stage=$stage enrollment/config/tasks/report/renew/admission traversed edge TLS and origin HTTP"
 stage=complete
 record "PASS all stages"
