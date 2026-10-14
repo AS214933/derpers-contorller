@@ -1,0 +1,11 @@
+# Temporary v0.1 migration overlay; old mTLS nodes still reach native TLS directly.
+# Use only with a valid server certificate and an explicitly restricted bind address.
+services:
+  controller:
+    environment:
+      NODE_AUTH_MODE: hybrid
+      TLS_ADDR: :8443
+      TLS_CERT_FILE: /certs/server.crt
+      TLS_KEY_FILE: /certs/server.key
+    ports:
+      - ${LEGACY_TLS_BIND:-127.0.0.1}:8443:8443

@@ -2,11 +2,14 @@
 services:
   prometheus:
     image: prom/prometheus:v3.7.3@sha256:49214755b6153f90a597adcbff0252cc61069f8ab69ce8411285cd4a560e8038
+    # Read the root/private bootstrap token without making the host secret world-readable.
+    user: "0:0"
     restart: unless-stopped
     command: [--config.file=/etc/prometheus/prometheus.yml, --storage.tsdb.retention.time=30d]
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./alerts.yml:/etc/prometheus/alerts.yml:ro
+      - ./secrets/metrics-token:/run/secrets/metrics-token:ro
       - prometheus:/prometheus
     ports: [127.0.0.1:9090:9090]
     networks: [private]

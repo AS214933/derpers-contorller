@@ -37,7 +37,7 @@ jobs:
         env:
           IMAGE_TAG: ${{ github.sha }}-${{ matrix.arch }}
         run: bash e2e/build-images.sh
-      - name: Exercise real Headscale, Agent, DERP and TUN clients
+      - name: Exercise proxied controller, signed Agent, Headscale and TUN clients
         env:
           IMAGE_TAG: ${{ github.sha }}-${{ matrix.arch }}
           DERP_PORT: ${{ matrix.port }}

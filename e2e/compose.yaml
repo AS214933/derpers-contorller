@@ -16,11 +16,13 @@ services:
     environment:
       DATABASE_URL: postgres://derpers:e2e-only@postgres:5432/derpers?sslmode=disable
       MASTER_KEY: ${MASTER_KEY}
+      METRICS_TOKEN: ${METRICS_TOKEN}
       CONTROLLER_URL: https://controller.e2e.test:8443
+      PUBLIC_URL: https://controller.e2e.test:8443
       HTTP_ADDR: :8080
-      TLS_ADDR: :8443
-      TLS_CERT_FILE: /certs/controller.e2e.test.crt
-      TLS_KEY_FILE: /certs/controller.e2e.test.key
+      TLS_ADDR: ""
+      NODE_AUTH_MODE: proof
+      NODE_IDENTITY_TTL: 5m
       NODE_CA_CERT_FILE: /certs/ca.crt
       NODE_CA_KEY_FILE: /certs/ca.key
       HEADSCALE_ALLOWED_CIDRS: 172.30.0.0/16,fd30:de::/64
@@ -30,6 +32,19 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    networks: [test]
+  origin:
+    image: ${NGINX_IMAGE}
+    volumes:
+      - ./nginx-origin.conf:/etc/nginx/nginx.conf:ro
+    depends_on: [controller]
+    networks: [test]
+  edge:
+    image: ${NGINX_IMAGE}
+    volumes:
+      - ./nginx-edge.conf:/etc/nginx/nginx.conf:ro
+      - ${E2E_WORK}/certs:/certs:ro
+    depends_on: [origin]
     networks:
       test:
         aliases: [controller.e2e.test]
@@ -51,6 +66,8 @@ services:
       CADDY_CONTAINER: ${COMPOSE_PROJECT_NAME}-caddy
       MANAGE_CONTAINERS: "true"
       PUBLISH_NODE_PORTS: "false"
+      POLL_INTERVAL: 2s
+      HEARTBEAT_INTERVAL: 2s
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ${E2E_WORK}/certs:/certs:ro
