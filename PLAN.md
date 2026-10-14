@@ -2,6 +2,8 @@
 
 更新日期：2026-10-14。当前阶段执行本计划：开发完整平台，推送目标仓库，通过真实 E2E 后发布 GHCR。各功能是否完成以实现、测试和交付证据为准。Git 提交和 PR 标题遵守 [CONTRIBUTING.md](CONTRIBUTING.md) 中的 Conventional Commits 约定。
 
+v0.2.0 增量目标：所有控制器接口可通过 `EdgeOne HTTPS → 普通 Nginx 反向代理 → HTTP 控制器`。默认使用基于原节点证书私钥的应用请求签名，控制器本机 TLS 可选；derper 镜像源码、入口、验证 URL 和参数保持不变。交付包含受控源站配置、旧 mTLS 节点迁移方式，以及四组真实双代理 E2E。部署细节见 [EdgeOne 与 Nginx](docs/edgeone-nginx.md)。
+
 ## 一、目标、架构与复用原则
 
 构建一个支持多个官方 Tailnet 和多个独立 Headscale 的共享 DERP 平台。各控制平面独立管理设备，平台统一执行 DERP 准入，并提供 OIDC 门户、管理员审核、节点运维、DNS、证书和监控。
@@ -63,14 +65,16 @@
 | /healthz、/readyz | 控制器存活与依赖就绪，响应不含配置和秘密 |
 | 内部 /metrics | 监控指标，限制访问 |
 
-管理网页采用 OIDC，节点 API 和准入 API 采用 mTLS，分入口部署。节点身份来自经过验证的证书，并检查节点启用状态；身份转发头只能由可信入口生成。控制器还提供使用本机配置和数据库权限的管理 CLI，供初始化、备份恢复和 E2E 引导，复用管理服务层的校验与审计。
+管理网页采用 OIDC，节点 API 和准入 API 默认采用 `NODE_AUTH_MODE=proof`，可与网页共用 EdgeOne HTTPS 域名。Agent 以原节点证书私钥生成短时 JWS，置于 `Authorization: DerpersProof ...`；绑定请求方法、原始 URI、请求体摘要和公开原点。控制器独立验证节点证书、签名、启用状态及防重放 nonce，不信任转发证书身份头。请求签名有效窗口 60 秒、允许时钟偏差 15 秒，代理不得改写请求或缓存响应。控制器还提供使用本机配置和数据库权限的管理 CLI，复用管理校验和审计。
+
+默认控制器仅 HTTP 8080，节点 CA 签发材料仍必需；本机服务端证书和 TLS listener 可选。`hybrid` 只用于受控迁移，兼容真实 native mTLS 和应用签名，不能把普通代理的转发头当作 mTLS。先保留旧直连入口升级 Agent，再切换 CDN URL，全部升级后切 proof 并关闭旧 TLS。公开跨网络回源应在 Nginx 终止普通 HTTPS，受控私网回源可使用 HTTP。
 
 门户导出官方 Tailnet 的 derpMap 策略片段，以及 Headscale 使用的 JSON URL / YAML。默认保留官方 DERP，导出时可选平台专用模式。第一版每节点一个稳定 RegionID，分配 900–999，正确生成 HostName、DERPPort、STUNPort、CanPort80。新节点通过检查后才发布；临时离线与发布状态分开。用户将配置应用到自己的控制平面；设备只读 OAuth 不自动修改其策略。
 
 ## 三、节点、DNS、证书与运维行为
 
 - 管理员录入名称、地域、公网地址、DNS 账户、域名后缀、HTTPS / STUN 端口后生成部署包。节点默认 HTTPS 443/TCP、STUN 3478/UDP，支持改端口及关闭 STUN；HTTP 探测固定 80/TCP，可单独关闭。
-- 公开 DERP 流量直接进入 derper；derper 的验证 URL 指向 Caddy 的 Docker 内部监听地址，Caddy 使用节点客户端证书转发控制器。Caddy 的 80 端口只转发受支持的探测路径；内部验证、管理和采集端口不发布公网。
+- 公开 DERP 流量直接进入 derper；验证 URL 仍为 `http://caddy:9080/verify`，Caddy 转发到 Agent 私网 `:9081` relay，Agent 签名后通过公开 HTTPS 控制器入口请求准入。derper 的参数与协议不改。Caddy 的 80 端口只转发受支持的探测路径；Agent relay、内部验证、管理和采集端口不发布公网。
 - 注册令牌绑定一个节点、单次使用、10 分钟过期；Agent 本机生成身份私钥并提交 CSR。证书自动续期，节点禁用状态使未过期证书也不能调用节点 API。Agent 主动访问后台，无公网管理端口。
 - Agent 通过 Docker Engine API 只管理带本节点归属标签的 derper 和 Caddy。Docker socket 仅提供给 Agent，远程任务限于应用配置、读取状态/日志、重启和升级指定组件。
 - 每 15 秒心跳，60 秒无心跳标记管理通道离线；另行展示中继健康。配置使用版本号，任务使用唯一 ID；重复投递不重复执行。应用前验证配置，失败保留或恢复上一个有效版本。
@@ -80,7 +84,7 @@
 - DNS 记录归属入库，只更新或删除平台管理的 A/AAAA，冲突时报告；Cloudflare 使用 DNS only。每个 DNS 账户独立实例化客户端，避免通过进程级环境变量切换并发账户凭据。
 - 控制器复用 lego，通过 DNS-01 为每节点申请独立证书；每天检查，剩余有效期进入总有效期最后三分之一时续期。失败保留尚有效旧证书并告警；每节点仅能获取自己的材料。
 - DNS / OAuth 凭据和证书私钥加密入库，主密钥从部署 Secret 提供。YAML 保存启动配置，网页运行配置入 PostgreSQL。备份包含数据库及独立保护的主密钥、节点 CA 恢复材料。
-- Prometheus / Grafana 复用现成监控；记录准入、同步、审批和节点任务审计，默认保留 30 天。进程日志复用 Docker logging，后台按需获取近期日志并脱敏。
+- Prometheus / Grafana 复用现成监控；`/metrics` 要求独立 Bearer 令牌或管理员会话，Nginx 公共入口拒绝该路径，Prometheus 私网采集并只读挂载令牌文件。记录准入、同步、审批和节点任务审计，默认保留 30 天。代理日志不含 Authorization、Cookie、令牌和请求体；后台按需获取近期日志并脱敏。
 
 ## 四、GitHub 交付与 GHCR 发布
 
@@ -92,7 +96,7 @@
 | Agent | ghcr.io/as214933/derpers-contorller-agent |
 | 固定官方源码构建的 derper，无协议修改 | ghcr.io/as214933/derpers-contorller-derper |
 
-Caddy 和 PostgreSQL 引用上游标准镜像并固定摘要。上述三套项目镜像发布 linux/amd64 和 linux/arm64；加上 source、revision、version 等 OCI 标签。GHCR 包关联目标仓库并设为 public，首次发布后验证匿名拉取；GitHub 的新包默认私有，不能只依据仓库公开就认为镜像公开。
+Caddy、PostgreSQL 和 Nginx 引用上游标准镜像并固定摘要。Nginx 使用已核实的 stable 1.30.5 多架构索引。上述三套项目镜像发布 linux/amd64 和 linux/arm64；加上 source、revision、version 等 OCI 标签。GHCR 包关联目标仓库并设为 public，首次发布后验证匿名拉取；GitHub 的新包默认私有，不能只依据仓库公开就认为镜像公开。v0.2.0 的 derper 源码与验证参数保持原组合不变。
 
 使用四个工作流职责：
 
@@ -113,14 +117,14 @@ Caddy 和 PostgreSQL 引用上游标准镜像并固定摘要。上述三套项�
 
 在 GitHub Ubuntu VM 上启动真实服务，而非验证 API 的替身：
 
-1. 一套本提交构建的控制器与 PostgreSQL。
+1. 一套本提交构建的 HTTP-only 控制器与 PostgreSQL；两个真实 Nginx 分别终止公开 TLS、转发 HTTP 源站请求，模拟 CDN 与普通反向代理。
 2. 一个固定发布版 Headscale，关闭内嵌 DERP，配置仅含测试节点的 DERP Map。
 3. 一个完整 DERP 节点：本提交 derper、标准 Caddy、本提交 Agent。
 4. 两个固定版本 Tailscale 客户端，各自独立状态目录、容器网络命名空间、TUN 设备和所需网络权限。
 
 默认矩阵为 ubuntu-24.04 / ubuntu-24.04-arm 两种原生架构，以及 443 / 8443 两种 DERP TLS 端口，共四组。每组最长 25 分钟；每个就绪/传播等待有独立上限并输出失败状态，不能以无界重试掩盖错误。Docker 镜像保存/加载兼容性在 runner 预检，必要时按已核查的 Docker 版本固定存储驱动。
 
-每组运行时生成临时 CA、正确 SAN 的服务证书、节点注册令牌和 Headscale preauth keys；客户端与服务显式信任测试 CA。客户端不使用 InsecureForTests 或关闭 TLS 验证。用控制器管理 CLI 导入本次测试来源及证书材料，仅为本次 Docker 网段明确配置允许访问的 Headscale 范围，再走实际 Agent 注册、配置/证书分发和 mTLS 验证路径。测试 CA 与容器 DNS 服务于 CI，生产 ACME / 公网 DNS 单独验收。
+每组运行时生成临时 CA、正确 SAN 的服务证书、节点注册令牌和 Headscale preauth keys；客户端与服务显式信任测试 CA。客户端不使用 InsecureForTests 或关闭 TLS 验证。用 CLI 导入测试来源及材料，仅为测试 Docker 网段明确允许 Headscale，再走真实 Agent 注册、配置、任务、上报、续期及准入签名路径。控制器 TLS_ADDR 留空，确认其 native TLS 端口无 listener；两级代理日志分别断言 HTTPS 与 HTTP 成功请求。测试身份 TTL 为 5 分钟以触发实际续期，生产默认 7 天。CI 不使用生产 EdgeOne 凭据，实际 EdgeOne 缓存、挑战与回源网络、ACME / 公网 DNS 单独验收。
 
 ### 正向路径与必须断言
 
@@ -131,6 +135,7 @@ Caddy 和 PostgreSQL 引用上游标准镜像并固定摘要。上述三套项�
 5. A 到 B、B 到 A 分别运行 tailscale ping --until-direct=false --c=5 <对方 Tailscale IPv4>。每次断言至少 3 个成功响应且所有成功响应都包含 via DERP(e2e)，发现 direct、peer-relay 或其他 Region 即失败。
 6. 双向执行 tailscale ping --tsmp 验证 WireGuard 内部数据通信，再用系统 ping -c 3 验证 TUN / IP 通信。由前述网络限制和唯一 DERP Map 保证相同中继路径。
 7. 同时检查控制器有两个公钥的允许审计、来源为本次 Headscale，DERP 连接/中继计数随测试增长。不能只以 CLI 返回码或容器 healthy 判定成功。
+8. 通过管理服务创建日志任务，等待 Agent 拉取并上报 succeeded；等待真实 node identity 续期审计。两级代理日志对 enroll/config/tasks/report/renew/admission 分别记录成功状态、协议、签名存在标记及 no-store，不记录签名值；Origin Nginx 和 controller 之间无 TLS 客户端证书。
 
 普通 tailscale ping 默认使用 DISCO 并可能转向直连；TSMP 和系统 ICMP 分别进一步覆盖加密隧道与操作系统网络路径。因此路径断言和真实网络限制必须一起存在。
 
@@ -144,12 +149,13 @@ Caddy 和 PostgreSQL 引用上游标准镜像并固定摘要。上述三套项�
 | 验证传输失败 | 保持 Caddy 和控制器运行，在 derper 网络命名空间阻断到 Caddy 验证端口的 TCP，主动断开两客户端原 DERP 连接 | derper 的 HTTP 请求发生真正传输错误，仍拒绝客户端；Caddy 返回 502 不能单独证明 fail-open=false |
 | 故障恢复 | 恢复来源或控制器，等待重新就绪 | 两客户端重新通过 DERP 双向通信 |
 | 内部接口隔离 | 访问公开调试路径，并检查管理/验证端口的外部连通性及 Docker 端口映射 | 调试请求被拒绝，内部端口未发布，内部采集仍正常 |
+| 代理身份边界 | 公开入口发送未签名请求和伪造客户端证书转发头，访问 metrics | 节点/准入请求拒绝，metrics 不公开；私网令牌采集正常 |
 
 安全用例必须主动关闭原连接再测试，不能要求官方 derper 在控制器故障时自动踢掉旧连接。每个故障前后检查已授权基线，故障期间检查 TLS、实际 DERP Map、客户端 daemon 和 peer 信息仍正常；命令、socket、证书及 peer 故障不得算作拒绝成功。不能靠删除 Headscale 设备作为唯一撤销测试，因为那会同时改变客户端 peer 信息。
 
 ### 证据、清理与覆盖边界
 
-- 无论成功或失败都收集脱敏的控制器、Agent、derper、Caddy、Headscale、客户端日志，双向 ping 输出、status/netcheck/DERP Map、网络规则计数、镜像 ID、配置版本和各阶段结果。
+- 无论成功或失败都收集脱敏的两级 Nginx、控制器、Agent、derper、Caddy、Headscale、客户端日志，双向 ping 输出、status/netcheck/DERP Map、网络规则计数、镜像 ID、任务结果、身份续期审计、配置版本和各阶段结果。
 - 在 Actions Summary 输出用例、架构、端口、耗时、镜像标识及失败原因；上传脱敏 artifacts，保留 7 天，不上传私钥、令牌、完整数据库或含秘密的 Compose 渲染结果。
 - 始终清理本次 Compose project、网络和卷；不清理 runner 上无关资源。E2E 失败阻止该提交的 GHCR 发布。
 - 此闭环验证一个 Headscale、一个 DERP 和两真实客户端；单 runner 不证明跨地区公网质量。多来源 OR、官方 OAuth 同步、缓存失效、OIDC 权限和 DNS 适配另有契约/集成测试，真实官方 Tailnet 与 DNS API 需要专用测试凭据后再验收。
