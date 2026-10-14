@@ -1,5 +1,7 @@
 # 运维与恢复
 
+v0.2.0 默认通过 EdgeOne/Nginx 访问 HTTP-only 控制器；公网回源 TLS 由 Nginx 终止，节点使用应用请求签名。安装、缓存规则、受控源站绑定及 `hybrid → 新 Agent → proof` 迁移见 [代理部署说明](edgeone-nginx.md)。
+
 ## DNS 记录恢复
 
 正在服务的节点更新证书后，控制器等待 Agent 确认配置版本及新鲜 TLS 探测，最多等待两分钟，并在处理下一个节点前至少间隔 20 秒。未确认应用会产生独立审计与告警，已签发证书保留供恢复；任务 ID 随证书材料一同持久化，控制器重启不会重复签发已经完成的同一任务。
@@ -22,7 +24,7 @@ docker compose --env-file deploy/.env -f deploy/compose.yaml exec -T postgres \
 
 ## 升级与回滚
 
-部署示例默认 `IMAGE_VERSION=v0.1.0`。生产在 `deploy/.env` 设置完整的 `CONTROLLER_IMAGE`、`AGENT_IMAGE`、`DERPER_IMAGE` 引用，如 `ghcr.io/as214933/derpers-contorller-controller@sha256:<已核实的发布索引摘要>`；这些值优先于版本标签，留空时使用 `IMAGE_VERSION`。控制器同时使用覆盖后的 Agent/derper 引用生成节点配置和部署包；手工使用节点 Compose 时，将相同的 `AGENT_IMAGE` 写入 `deploy/node.env`。
+部署示例默认 `IMAGE_VERSION=v0.2.0`。生产在 `deploy/.env` 设置完整的 `CONTROLLER_IMAGE`、`AGENT_IMAGE`、`DERPER_IMAGE` 引用，如 `ghcr.io/as214933/derpers-contorller-controller@sha256:<已核实的发布索引摘要>`；这些值优先于版本标签，留空时使用 `IMAGE_VERSION`。控制器同时使用覆盖后的 Agent/derper 引用生成节点配置和部署包；手工使用节点 Compose 时，将相同的 `AGENT_IMAGE` 写入 `deploy/node.env`。
 
 通过管理员节点任务指定镜像摘要升级。先一个节点，检查配置版本、准入错误、两客户端中继通信，再升级其余节点。Agent 自动回滚失败的组件升级；控制器数据库迁移前保留备份，在需要数据库回退时用匹配版本和备份恢复，不能只更换旧镜像假设数据库向后兼容。
 
@@ -34,7 +36,7 @@ docker compose --env-file deploy/.env -f deploy/compose.yaml exec -T postgres \
 
 ## 监控与日志
 
-控制器 `/metrics` 限制访问，Prometheus 通过可信私网采集；后台显示节点 CPU/内存/流量、连接与中继计数、心跳和错误。Agent 在 derper 网络命名空间内部通过正确 SNI/CA 读取受保护 metrics，不公开调试入口。审计默认保留 30 天；Docker 日志应配置轮转，避免磁盘耗尽。
+控制器 `/metrics` 要求管理员会话或独立 METRICS_TOKEN Bearer 凭据，Prometheus 通过可信私网读取只读 token 文件采集；后台显示节点 CPU/内存/流量、连接与中继计数、心跳和错误。Agent 在 derper 网络命名空间内部通过正确 SNI/CA 读取受保护 metrics，不公开调试入口。审计默认保留 30 天；Docker 日志应配置轮转，避免磁盘耗尽。
 
 STUN 为独立 UDP 服务，按环境决定是否开放。准入来源失效首先影响新连接；需要立即撤销所有既有连接时执行节点重启并记录影响。控制器单实例不可用会拒绝新准入，既有连接遵循官方生命周期。
 
