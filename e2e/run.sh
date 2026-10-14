@@ -123,8 +123,12 @@ export NODE_ID ENROLLMENT_TOKEN
 node_healthy() { docker inspect -f '{{.State.Running}}' "$derper" 2>/dev/null | grep -qx true && docker inspect -f '{{.State.Running}}' "$caddy" 2>/dev/null | grep -qx true && ctl node publish --id "$NODE_ID" >"$evidence/published-node.json" 2>/dev/null; }
 wait_for 150 node_healthy
 stage=proxy-node-auth
-for path in /node/v1/config /admission/v1/verify; do
-  status="$("${compose[@]}" exec -T controller curl --cacert /certs/ca.crt -sS -o /dev/null -w '%{http_code}' -H 'X-SSL-Client-Verify: SUCCESS' -H "X-SSL-Client-CN: $NODE_ID" -H "X-Forwarded-Client-Cert: CN=$NODE_ID" "https://controller.e2e.test:8443$path")"
+for route in 'GET /node/v1/config' 'POST /admission/v1/verify'; do
+  read -r method path <<<"$route"
+  request_args=(--request "$method")
+  if [[ "$method" == POST ]]; then request_args+=(--header 'Content-Type: application/json' --data-binary '{}'); fi
+  status="$("${compose[@]}" exec -T controller curl --cacert /certs/ca.crt -sS -o /dev/null -w '%{http_code}' "${request_args[@]}" -H 'X-SSL-Client-Verify: SUCCESS' -H "X-SSL-Client-CN: $NODE_ID" -H "X-Forwarded-Client-Cert: CN=$NODE_ID" "https://controller.e2e.test:8443$path")"
+  jq -nc --arg method "$method" --arg path "$path" --arg status "$status" '{method:$method,path:$path,status:$status}' >>"$evidence/forwarded-identity-denials.jsonl"
   [[ "$status" == 403 ]]
 done
 status="$("${compose[@]}" exec -T controller curl --cacert /certs/ca.crt -sS -o /dev/null -w '%{http_code}' https://controller.e2e.test:8443/metrics)"
